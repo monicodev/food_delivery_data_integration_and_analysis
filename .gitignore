@@ -216,3 +216,12 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+/source
+/.atl
+/.agents
+skills-lock.json
+/.openspec
+/sdd
+.DS_Store
+AGENT.md
