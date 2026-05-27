@@ -21,9 +21,8 @@ class PersistenceLayer:
 
     def _flatten_menu_items(self, venue_data: VenueSchema) -> List[MenuItemSchema]:
         items = []
-        for menu in venue_data.menus.values():
-            for section in menu.sections:
-                items.extend(section.items)
+        for section in venue_data.menus:
+            items.extend(section.items)
         return items
 
     def _get_address_string(self, venue_data: VenueSchema) -> str:

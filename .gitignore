@@ -217,6 +217,7 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
+/data
 /source
 /.atl
 /.agents
@@ -225,3 +226,5 @@ skills-lock.json
 /sdd
 .DS_Store
 AGENT.md
+TECH_ASSESSMENT_EXCLUDED.md
+TECH_ASSESSMENT_REVIEW.md

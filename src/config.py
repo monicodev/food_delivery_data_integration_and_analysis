@@ -1,12 +1,56 @@
 import os
+import sys
 import logging
 from pathlib import Path
 from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
 
-# Load environment variables from .env file if it exists
+# Load environment variables first so LOG_LEVEL / LOG_FILE are picked up
 load_dotenv()
+
+
+def _discover_project_root() -> Path:
+    """Walk up from this file's directory to find the project root.
+    Looks for pyproject.toml, .git, or known markers."""
+    current = Path(__file__).resolve().parent.parent
+    for _ in range(10):
+        markers = [current / "pyproject.toml", current / ".git"]
+        if any(m.exists() for m in markers):
+            return current
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+    return Path(__file__).resolve().parent.parent.parent
+
+
+def _setup_logging():
+    _log_level = os.getenv("LOG_LEVEL", "INFO")
+    _log_file = os.getenv("LOG_FILE", "")
+
+    _formatter = logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    _root = logging.getLogger()
+    _root.setLevel(getattr(logging, _log_level.upper(), logging.INFO))
+
+    # Always log to stderr
+    _sh = logging.StreamHandler(sys.stderr)
+    _sh.setFormatter(_formatter)
+    _root.addHandler(_sh)
+
+    # Log to file (default: PROJECT_ROOT/data/logs/app.log)
+    _log_path = Path(_log_file) if _log_file else (_discover_project_root() / "data" / "logs" / "app.log")
+    _log_path.parent.mkdir(parents=True, exist_ok=True)
+    _fh = logging.FileHandler(str(_log_path))
+    _fh.setFormatter(_formatter)
+    _root.addHandler(_fh)
+
+
+_setup_logging()
 
 
 def _discover_project_root() -> Path:

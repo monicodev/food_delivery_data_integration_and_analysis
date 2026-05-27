@@ -141,78 +141,179 @@ class ScraperEngine:
         return len(redirect_history) > self.max_redirects
 
     @staticmethod
-    def _extract_menu_from_json_ld(data: dict) -> Optional[Dict[str, "MenuSchema"]]:
-        """Extract menu data from schema.org JSON-LD structured data.
-        Looks for hasMenu → Menu → hasMenuSection → MenuSection → hasMenuItem → MenuItem."""
-        from src.scraper.models import MenuSchema, MenuSectionSchema, MenuItemSchema
-        menus: Dict[str, MenuSchema] = {}
-        menu_containers = []
+    def _extract_menu_from_json_ld(jsonld_list: List[dict]) -> Optional[List["MenuSectionSchema"]]:
+        """Extract menu data from JSON-LD structured data across all scripts.
 
-        raw_menu = data.get("hasMenu")
-        if raw_menu:
-            menu_containers.append(raw_menu)
-        sub_menus = data.get("subMenus") or []
-        if isinstance(sub_menus, list):
-            menu_containers.extend(sub_menus)
+        Searches all JSON-LD blocks for @type: "Menu" (or blocks containing
+        hasMenu/hasMenuSection). Extracts menu sections and items, flattening
+        all sections into a single list.
+        """
+        from src.scraper.models import MenuSectionSchema, MenuItemSchema
+        all_sections: List[MenuSectionSchema] = []
+        menu_containers: List[dict] = []
+
+        for entry in jsonld_list:
+            if not isinstance(entry, dict):
+                continue
+
+            etype = entry.get("@type", "")
+            if isinstance(etype, list):
+                is_menu = "Menu" in etype
+            else:
+                is_menu = etype == "Menu"
+
+            if is_menu:
+                menu_containers.append(entry)
+            else:
+                raw = entry.get("hasMenu")
+                if raw is not None:
+                    if isinstance(raw, dict):
+                        menu_containers.append(raw)
+                    elif isinstance(raw, list):
+                        menu_containers.extend(raw)
+                subs = entry.get("subMenus") or []
+                if isinstance(subs, list):
+                    menu_containers.extend(s for s in subs if isinstance(s, dict))
 
         for menu_entry in menu_containers:
-            if isinstance(menu_entry, dict):
-                sections_raw = menu_entry.get("hasMenuSection") or menu_entry.get("menuSection") or []
-                if isinstance(sections_raw, dict):
-                    sections_raw = [sections_raw]
-                sections = []
-                for sec in sections_raw:
-                    if not isinstance(sec, dict):
+            if not isinstance(menu_entry, dict):
+                continue
+
+            sections_raw = menu_entry.get("hasMenuSection") or menu_entry.get("menuSection") or []
+            if isinstance(sections_raw, dict):
+                sections_raw = [sections_raw]
+            for sec in sections_raw:
+                if not isinstance(sec, dict):
+                    continue
+                sec_name = sec.get("name", "Menu")
+                items_raw = sec.get("hasMenuItem") or sec.get("menuItem") or []
+                if isinstance(items_raw, dict):
+                    items_raw = [items_raw]
+                items = []
+                for item in items_raw:
+                    if not isinstance(item, dict):
                         continue
-                    sec_name = sec.get("name", "Menu")
-                    items_raw = sec.get("hasMenuItem") or sec.get("menuItem") or []
-                    if isinstance(items_raw, dict):
-                        items_raw = [items_raw]
-                    items = []
-                    for item in items_raw:
-                        if not isinstance(item, dict):
-                            continue
-                        item_name = item.get("name", "")
-                        if not item_name:
-                            continue
-                        item_desc = item.get("description", "")
-                        offers = item.get("offers") or {}
-                        if isinstance(offers, list):
-                            offers = offers[0] if offers else {}
-                        price_raw = offers.get("price", "0") if isinstance(offers, dict) else "0"
-                        price = float(price_raw) if price_raw else 0.0
-                        items.append(MenuItemSchema(
-                            name=item_name,
-                            description=item_desc,
-                            price=price,
-                        ))
-                    if items:
-                        sections.append(MenuSectionSchema(
-                            name=sec_name,
-                            items=items,
-                        ))
-                if sections:
-                    menu_key = f"jsonld_menu_{len(menus)}"
-                    menus[menu_key] = MenuSchema(sections=sections)
-        return menus if menus else None
+                    item_name = item.get("name", "")
+                    if not item_name:
+                        continue
+                    item_desc = item.get("description", "")
+                    offers = item.get("offers") or {}
+                    if isinstance(offers, list):
+                        offers = offers[0] if offers else {}
+                    price_raw = offers.get("price", "0") if isinstance(offers, dict) else "0"
+                    price = float(price_raw) if price_raw else 0.0
+                    items.append(MenuItemSchema(
+                        name=item_name,
+                        description=item_desc,
+                        price=price,
+                    ))
+                if items:
+                    all_sections.append(MenuSectionSchema(
+                        name=sec_name,
+                        items=items,
+                    ))
+        return all_sections if all_sections else None
 
     @staticmethod
-    async def _extract_json_ld(page: "Page") -> Optional[dict]:
+    async def _extract_json_ld(page: "Page") -> List[dict]:
+        """Extract ALL JSON-LD scripts from the page, flattening @graph arrays.
+
+        Returns a flat list of all individual JSON-LD objects found across
+        all <script type="application/ld+json"> tags, including items nested
+        inside @graph arrays.
+        """
+        results: List[dict] = []
         try:
             ld_scripts = await page.query_selector_all('script[type="application/ld+json"]')
             for script in ld_scripts:
                 text = await script.inner_text()
                 data = json.loads(text)
-                if isinstance(data, dict) and 'name' in data:
-                    return data
-                if isinstance(data, list):
+                if isinstance(data, dict):
+                    graph = data.pop("@graph", None)
+                    if graph is not None and isinstance(graph, list):
+                        for item in graph:
+                            if isinstance(item, dict):
+                                results.append(item)
+                    results.append(data)
+                elif isinstance(data, list):
                     for item in data:
-                        if isinstance(item, dict) and 'name' in item:
-                            return item
+                        if isinstance(item, dict):
+                            results.append(item)
         except Exception as e:
             logger.debug("JSON-LD extraction failed: %s", e)
-            pass
-        return None
+        return results
+
+    @staticmethod
+    def _extract_venue_info(jsonld_list: List[dict]) -> dict:
+        """Extract venue metadata from JSON-LD blocks with @type: Restaurant/FoodEstablishment.
+
+        Searches the flat list of JSON-LD objects for a restaurant block and
+        returns name, address, rating, cuisines, and logo URL.
+        """
+        venue = {
+            "name": None,
+            "address": None,
+            "rating": None,
+            "cuisines": None,
+            "logo_url": None,
+        }
+        for entry in jsonld_list:
+            if not isinstance(entry, dict):
+                continue
+            etype = entry.get("@type", "")
+            if isinstance(etype, list):
+                if "Restaurant" not in etype and "FoodEstablishment" not in etype:
+                    continue
+            elif etype not in ("Restaurant", "FoodEstablishment"):
+                continue
+
+            if venue["name"] is None:
+                venue["name"] = entry.get("name")
+
+            addr = entry.get("address")
+            if isinstance(addr, dict) and venue["address"] is None:
+                geo = entry.get("geo") or addr.get("geo") or {}
+                coords = [0.0, 0.0]
+                if isinstance(geo, dict):
+                    lat = geo.get("latitude", 0)
+                    lng = geo.get("longitude", 0)
+                    try:
+                        coords = [float(lng), float(lat)]
+                    except (ValueError, TypeError):
+                        coords = [0.0, 0.0]
+                venue["address"] = {
+                    "firstLine": addr.get("streetAddress", ""),
+                    "city": addr.get("addressLocality", ""),
+                    "postalCode": addr.get("postalCode", ""),
+                    "location": {"type": "Point", "coordinates": coords},
+                }
+
+            rating = entry.get("aggregateRating")
+            if isinstance(rating, dict) and venue["rating"] is None:
+                try:
+                    star = float(rating.get("ratingValue", 0))
+                except (ValueError, TypeError):
+                    star = 0.0
+                try:
+                    count = int(rating.get("reviewCount") or rating.get("ratingCount", 0))
+                except (ValueError, TypeError):
+                    count = 0
+                venue["rating"] = {"starRating": star, "count": count}
+
+            cuisines = entry.get("servesCuisine")
+            if cuisines and venue["cuisines"] is None:
+                if isinstance(cuisines, str):
+                    venue["cuisines"] = [cuisines]
+                elif isinstance(cuisines, list):
+                    venue["cuisines"] = [c for c in cuisines if isinstance(c, str)]
+
+            if venue["logo_url"] is None:
+                venue["logo_url"] = entry.get("logo") or entry.get("image")
+
+            if all(v is not None for v in venue.values()):
+                break
+
+        return venue
 
     async def scrape_url(self, url: str, page: "Page", venue_id: Optional[str] = None,
                          redirect_history: Optional[list] = None) -> Optional[VenueSchema]:
@@ -253,16 +354,28 @@ class ScraperEngine:
                 rating_data = RatingSchema()
                 cuisines = []
                 logo_url = None
-                menus: Dict[str, MenuSchema] = {}
+                menus: List[MenuSectionSchema] = []
 
-                json_ld = await self._extract_json_ld(page)
-                if json_ld:
-                    json_name = json_ld.get('name')
-                    if json_name:
-                        name = json_name
-                    jsonld_menus = self._extract_menu_from_json_ld(json_ld)
+                jsonld_list = await self._extract_json_ld(page)
+
+                if jsonld_list:
+                    venue_info = self._extract_venue_info(jsonld_list)
+                    if venue_info.get("name"):
+                        name = venue_info["name"]
+                        logger.info("Found name from JSON-LD Restaurant block: %s", name)
+                    if venue_info.get("address"):
+                        address_data = AddressSchema(**venue_info["address"])
+                        logger.info("Found address from JSON-LD: %s", venue_info["address"]["firstLine"])
+                    if venue_info.get("rating"):
+                        rating_data = RatingSchema(**venue_info["rating"])
+                    if venue_info.get("cuisines"):
+                        cuisines = venue_info["cuisines"]
+                    if venue_info.get("logo_url"):
+                        logo_url = venue_info["logo_url"]
+
+                    jsonld_menus = self._extract_menu_from_json_ld(jsonld_list)
                     if jsonld_menus:
-                        logger.info("Extracted menu data from JSON-LD for %s", name)
+                        logger.info("Extracted menu data from JSON-LD for %s (%d menus)", name, len(jsonld_menus))
                         menus = jsonld_menus
 
                 if name == "Unknown Restaurant":
@@ -278,127 +391,215 @@ class ScraperEngine:
                             logger.debug("Name selector '%s' failed: %s", tag, e)
                             continue
 
-                for selector in ['[data-testid="address"]', '[class*="address"]', '[class*="location"]',
-                                 '[itemprop="address"]']:
-                    try:
-                        el = await page.query_selector(selector)
-                        if el:
-                            address_text = (await el.inner_text()).strip()
-                            if address_text:
-                                address_data.firstLine = address_text
-                                break
-                    except Exception as e:
-                        logger.debug("Address selector '%s' failed: %s", selector, e)
-                        continue
+                # CSS fallback for address: only if JSON-LD did not provide it
+                if not address_data.firstLine:
+                    for selector in ['[data-testid="address"]', '[class*="address"]', '[class*="location"]',
+                                     '[itemprop="address"]']:
+                        try:
+                            el = await page.query_selector(selector)
+                            if el:
+                                address_text = (await el.inner_text()).strip()
+                                if address_text:
+                                    address_data.firstLine = address_text
+                                    break
+                        except Exception as e:
+                            logger.debug("Address selector '%s' failed: %s", selector, e)
+                            continue
 
                 # Only use CSS fallback if JSON-LD did not provide menus
                 if not menus:
-                    section_selectors = [
-                        '[data-testid*="menu-section"]', '[class*="menu-section"]',
-                        '[class*="category"]', '[class*="menu"]'
-                    ]
-                    item_selectors = [
-                        '[data-testid*="menu-item"]', '[class*="menu-item"]',
-                        '[class*="product"]', '[itemprop="menuItem"]'
-                    ]
-                    name_sel = ['.name', '.title', '[data-testid*="item-name"]', 'h3', 'h4', '[itemprop="name"]']
-                    desc_sel = ['.description', '.desc', '[data-testid*="description"]', '[itemprop="description"]', 'p']
-                    price_sel = ['.price', '[class*="price"]', '[data-testid*="price"]', '[itemprop="price"]']
+                    try:
+                        menu_container = await page.query_selector('[data-qa="menu-list"]')
+                    except Exception:
+                        menu_container = None
 
-                    sections_found = await page.query_selector_all(', '.join(section_selectors))
-                    if not sections_found:
-                        item_containers = await page.query_selector_all(', '.join(item_selectors))
-                        if item_containers:
-                            section_items = []
-                            for container in item_containers:
+                    if menu_container is not None:
+                        # --- Popular items carousel ---
+                        try:
+                            popular_el = await menu_container.query_selector('[data-qa="popular-items"]')
+                            if popular_el:
+                                pop_items_els = await popular_el.query_selector_all('[data-qa="popular-item"]')
+                                pop_items = []
+                                for el in pop_items_els:
+                                    try:
+                                        name_el = await el.query_selector('span[id^="name-"]')
+                                        if not name_el:
+                                            name_el = await el.query_selector('[data-qa="item-name"]')
+                                        price_el = await el.query_selector('span[id^="price-"]')
+                                        if not price_el:
+                                            price_el = await el.query_selector('[data-qa="item-price"]')
+                                        cat_el = await el.query_selector('[data-qa="popular-item-category"]')
+                                        if name_el:
+                                            pop_items.append(MenuItemSchema(
+                                                name=(await name_el.inner_text()).strip(),
+                                                price=self._parse_price((await price_el.inner_text()).strip(), self.locale) if price_el else 0.0,
+                                                description=(await cat_el.inner_text()).strip() if cat_el else ""
+                                            ))
+                                    except Exception:
+                                        continue
+                                if pop_items:
+                                    menus.append(MenuSectionSchema(name="Popular", items=pop_items))
+                        except Exception:
+                            pass
+
+                        # --- Category sections (with lazy-load scroll trigger) ---
+                        try:
+                            cat_els = await menu_container.query_selector_all('[data-qa="item-category"]')
+                            section_counter = 0
+                            item_counter = 0
+                            for cat_el in cat_els:
                                 try:
-                                    item_name = None
-                                    for s in name_sel:
-                                        item_name = await container.query_selector(s)
-                                        if item_name:
-                                            break
-                                    item_desc = None
-                                    for s in desc_sel:
-                                        item_desc = await container.query_selector(s)
-                                        if item_desc:
-                                            break
-                                    item_price = None
-                                    for s in price_sel:
-                                        item_price = await container.query_selector(s)
-                                        if item_price:
-                                            break
-                                    if item_name:
-                                        item_image = None
+                                    await cat_el.scroll_into_view_if_needed()
+                                    await page.wait_for_timeout(300)
+
+                                    name_el = await cat_el.query_selector('[data-qa="heading"]')
+                                    section_name = (await name_el.inner_text()).strip() if name_el else "Menu"
+
+                                    list_el = await cat_el.query_selector('ul[data-qa="item-category-list"]')
+                                    if not list_el:
+                                        list_el = await cat_el.query_selector('ul')
+                                    if not list_el:
+                                        continue
+
+                                    item_els = await list_el.query_selector_all('li[data-item-id]')
+                                    section_items = []
+                                    for item_el in item_els:
                                         try:
-                                            img_el = await container.query_selector('img')
-                                            if img_el:
-                                                item_image = await img_el.get_attribute('src')
+                                            item_name_el = await item_el.query_selector('[data-qa="item-name"]')
+                                            if not item_name_el:
+                                                continue
+
+                                            desc_text = ""
+                                            try:
+                                                text_els = await item_el.query_selector_all('[data-qa="text"]')
+                                                parts = []
+                                                for te in text_els:
+                                                    in_price = await te.evaluate('(el) => !!el.closest("[data-qa=item-price]")')
+                                                    in_name = await te.evaluate('(el) => !!el.closest("[data-qa=item-name]")')
+                                                    if not in_price and not in_name:
+                                                        text = (await te.inner_text()).strip()
+                                                        if text:
+                                                            parts.append(text)
+                                                desc_text = "\n".join(parts)
+                                            except Exception:
+                                                pass
+
+                                            price_el = await item_el.query_selector('[data-qa="item-price"]')
+                                            price_text = (await price_el.inner_text()).strip() if price_el else "0"
+
+                                            section_items.append(MenuItemSchema(
+                                                id=f"item-{item_counter}",
+                                                name=(await item_name_el.inner_text()).strip(),
+                                                description=desc_text,
+                                                price=self._parse_price(price_text, self.locale),
+                                            ))
+                                            item_counter += 1
                                         except Exception:
-                                            pass
-                                        section_items.append(MenuItemSchema(
-                                            name=(await item_name.inner_text()).strip(),
-                                            description=(await item_desc.inner_text()).strip() if item_desc else "",
-                                            price=self._parse_price((await item_price.inner_text()).strip(), self.locale) if item_price else 0.0,
-                                            image=item_image
+                                            continue
+
+                                    if section_items:
+                                        menus.append(MenuSectionSchema(
+                                            id=f"section-{section_counter}",
+                                            name=section_name,
+                                            items=section_items
                                         ))
-                                except Exception as e:
-                                    logger.debug("Menu item parsing failed: %s", e)
+                                        section_counter += 1
+                                except Exception:
                                     continue
-                            if section_items:
-                                menus["scraped"] = MenuSchema(sections=[MenuSectionSchema(name="Menu", items=section_items)])
-                    else:
-                        for section_el in sections_found:
-                            try:
-                                section_name_el = await section_el.query_selector(':scope > h2, :scope > h3, :scope > .name, :scope > .title, :scope > [data-testid*="section-name"]')
-                                section_name = (await section_name_el.inner_text()).strip() if section_name_el else "Menu"
+                        except Exception:
+                            pass
+
+                    # --- Generic fallback (if structured approach found nothing) ---
+                    if not menus:
+                        section_selectors = [
+                            '[data-testid*="menu-section"]', '[class*="menu-section"]',
+                            '[class*="category"]', '[class*="menu"]'
+                        ]
+                        item_selectors = [
+                            '[data-testid*="menu-item"]', '[data-qa*="menu-item"]',
+                            '[class*="menu-item"]', '[class*="product"]',
+                            '[itemprop="menuItem"]'
+                        ]
+                        name_sel = ['.name', '.title', '[data-testid*="item-name"]',
+                                    '[data-qa*="item-name"]', 'h3', 'h4', '[itemprop="name"]']
+                        desc_sel = ['.description', '.desc', '[data-testid*="description"]',
+                                    '[data-qa*="description"]', '[itemprop="description"]', 'p']
+                        price_sel = ['.price', '[class*="price"]', '[data-testid*="price"]',
+                                     '[data-qa*="price"]', '[itemprop="price"]']
+
+                        sections_found = await page.query_selector_all(', '.join(section_selectors))
+                        if not sections_found:
+                            item_containers = await page.query_selector_all(', '.join(item_selectors))
+                            if item_containers:
                                 section_items = []
-                                items_in_section = await section_el.query_selector_all(', '.join(item_selectors))
-                                for item_el in items_in_section:
+                                for container in item_containers:
                                     try:
                                         item_name = None
                                         for s in name_sel:
-                                            item_name = await item_el.query_selector(s)
+                                            item_name = await container.query_selector(s)
                                             if item_name:
                                                 break
-                                        if not item_name:
-                                            item_name = await item_el.query_selector(':scope > *, :scope > div')
+                                        item_desc = None
+                                        for s in desc_sel:
+                                            item_desc = await container.query_selector(s)
+                                            if item_desc:
+                                                break
+                                        item_price = None
+                                        for s in price_sel:
+                                            item_price = await container.query_selector(s)
+                                            if item_price:
+                                                break
                                         if item_name:
-                                            name_text = (await item_name.inner_text()).strip()
-                                            item_desc = None
-                                            for s in desc_sel:
-                                                item_desc = await item_el.query_selector(s)
-                                                if item_desc:
-                                                    break
-                                            item_price = None
-                                            for s in price_sel:
-                                                item_price = await item_el.query_selector(s)
-                                                if item_price:
-                                                    break
-                                            item_image = None
-                                            try:
-                                                img_el = await item_el.query_selector('img')
-                                                if img_el:
-                                                    item_image = await img_el.get_attribute('src')
-                                            except Exception:
-                                                pass
                                             section_items.append(MenuItemSchema(
-                                                name=name_text,
+                                                name=(await item_name.inner_text()).strip(),
                                                 description=(await item_desc.inner_text()).strip() if item_desc else "",
                                                 price=self._parse_price((await item_price.inner_text()).strip(), self.locale) if item_price else 0.0,
-                                                image=item_image
                                             ))
                                     except Exception as e:
-                                        logger.debug("Section item parsing failed: %s", e)
+                                        logger.debug("Menu item parsing failed: %s", e)
                                         continue
                                 if section_items:
-                                    section = MenuSectionSchema(name=section_name, items=section_items)
-                                    menu_id = f"section_{len(menus)}"
-                                    if menu_id not in menus:
-                                        menus[menu_id] = MenuSchema(sections=[section])
-                                    else:
-                                        menus[menu_id].sections.append(section)
-                            except Exception:
-                                continue
+                                    menus.append(MenuSectionSchema(name="Menu", items=section_items))
+                        else:
+                            for section_el in sections_found:
+                                try:
+                                    section_name_el = await section_el.query_selector(':scope > h2, :scope > h3, :scope > .name, :scope > .title, :scope > [data-testid*="section-name"], :scope > [data-qa*="section-name"]')
+                                    section_name = (await section_name_el.inner_text()).strip() if section_name_el else "Menu"
+                                    section_items = []
+                                    items_in_section = await section_el.query_selector_all(', '.join(item_selectors))
+                                    for item_el in items_in_section:
+                                        try:
+                                            item_name = None
+                                            for s in name_sel:
+                                                item_name = await item_el.query_selector(s)
+                                                if item_name:
+                                                    break
+                                            if not item_name:
+                                                item_name = await item_el.query_selector(':scope > *, :scope > div')
+                                            if item_name:
+                                                name_text = (await item_name.inner_text()).strip()
+                                                item_desc = None
+                                                for s in desc_sel:
+                                                    item_desc = await item_el.query_selector(s)
+                                                    if item_desc:
+                                                        break
+                                                item_price = None
+                                                for s in price_sel:
+                                                    item_price = await item_el.query_selector(s)
+                                                    if item_price:
+                                                        break
+                                                section_items.append(MenuItemSchema(
+                                                    name=name_text,
+                                                    description=(await item_desc.inner_text()).strip() if item_desc else "",
+                                                    price=self._parse_price((await item_price.inner_text()).strip(), self.locale) if item_price else 0.0,
+                                                ))
+                                        except Exception as e:
+                                            logger.debug("Section item parsing failed: %s", e)
+                                            continue
+                                    if section_items:
+                                        menus.append(MenuSectionSchema(name=section_name, items=section_items))
+                                except Exception:
+                                    continue
 
                 return VenueSchema(
                     id=venue_id,
@@ -439,19 +640,10 @@ class ScraperEngine:
                 ]
             )
         ]
-        menu_hash = "mock_menu_hash_001"
-        menus = {
-            menu_hash: MenuSchema(
-                menuGroupId="MOCK_GROUP_001",
-                type=["delivery"],
-                sections=mock_sections
-            )
-        }
 
         return VenueSchema(
             id=venue_id,
             name=f"Mock Restaurant {venue_id}",
-            uniqueName=f"mock-restaurant-{venue_id}",
             address=AddressSchema(
                 city="Barcelona",
                 firstLine="123 Carrer de Example",
@@ -462,7 +654,7 @@ class ScraperEngine:
             logoUrl=None,
             cuisines=["example-cuisine"],
             url=url,
-            menus=menus
+            menus=mock_sections
         )
 
     async def run(self, urls: Optional[List[str]] = None):

@@ -20,11 +20,9 @@ class TestScraperModels(unittest.TestCase):
     def test_venue_schema_rich_structure(self):
         item = MenuItemSchema(name="Sushi Roll", price=12.0)
         section = MenuSectionSchema(name="Starters", items=[item])
-        menu = MenuSchema(sections=[section])
         venue = VenueSchema(
             id="test-001",
             name="Test Restaurant",
-            uniqueName="test-restaurant",
             address=AddressSchema(
                 city="Barcelona",
                 firstLine="Carrer Example 123",
@@ -34,7 +32,7 @@ class TestScraperModels(unittest.TestCase):
             rating=RatingSchema(count=50, starRating=4.5),
             cuisines=["japanese", "sushi"],
             url="https://just-eat.es/test",
-            menus={"hash1": menu}
+            menus=[section]
         )
 
         d = venue.model_dump()
@@ -42,8 +40,8 @@ class TestScraperModels(unittest.TestCase):
         self.assertEqual(d["address"]["city"], "Barcelona")
         self.assertEqual(d["rating"]["starRating"], 4.5)
         self.assertEqual(d["cuisines"], ["japanese", "sushi"])
-        self.assertIn("hash1", d["menus"])
-        self.assertEqual(d["menus"]["hash1"]["sections"][0]["items"][0]["name"], "Sushi Roll")
+        self.assertEqual(len(d["menus"]), 1)
+        self.assertEqual(d["menus"][0]["items"][0]["name"], "Sushi Roll")
 
     def test_venue_no_menus(self):
         venue = VenueSchema(id="empty", name="Empty Place", url="http://example.com")
@@ -71,8 +69,7 @@ class TestPersistenceHelpers(unittest.TestCase):
         items_b = [MenuItemSchema(name="Soda", price=1.99)]
         section_a = MenuSectionSchema(name="Main", items=items_a)
         section_b = MenuSectionSchema(name="Drinks", items=items_b)
-        menu = MenuSchema(sections=[section_a, section_b])
-        venue = VenueSchema(id="v1", name="Test", url="x", menus={"m1": menu})
+        venue = VenueSchema(id="v1", name="Test", url="x", menus=[section_a, section_b])
 
         flat = self.persist._flatten_menu_items(venue)
         self.assertEqual(len(flat), 3)
@@ -115,8 +112,7 @@ class TestPersistenceHelpers(unittest.TestCase):
             MenuItemSchema(name="Pasta", price=10.0)
         ]
         section = MenuSectionSchema(name="Food", items=items)
-        menu = MenuSchema(sections=[section])
-        venue = VenueSchema(id="v-test", name="Test Venue", url="http://x.com", menus={"m1": menu})
+        venue = VenueSchema(id="v-test", name="Test Venue", url="http://x.com", menus=[section])
 
         self.persist.save_to_sqlite(venue)
 
@@ -131,8 +127,7 @@ class TestPersistenceHelpers(unittest.TestCase):
     def test_save_to_json_contains_nested_structure(self):
         item = MenuItemSchema(name="Taco", price=5.0)
         section = MenuSectionSchema(name="Mexican", items=[item])
-        menu = MenuSchema(sections=[section])
-        venue = VenueSchema(id="v-json", name="JSON Venue", url="http://y.com", menus={"m1": menu})
+        venue = VenueSchema(id="v-json", name="JSON Venue", url="http://y.com", menus=[section])
 
         path = self.persist.save_to_json(venue)
         with open(path, 'r') as f:

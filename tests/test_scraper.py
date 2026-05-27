@@ -11,11 +11,10 @@ from src.config import Config
 
 
 def _find_menu_item(data: dict, target_name: str) -> bool:
-    for menu in data.get("menus", {}).values():
-        for section in menu.get("sections", []):
-            for item in section.get("items", []):
-                if item.get("name") == target_name:
-                    return True
+    for section in data.get("menus", []):
+        for item in section.get("items", []):
+            if item.get("name") == target_name:
+                return True
     return False
 
 
