@@ -125,6 +125,7 @@ class Config:
     IMAGES_OUTPUT_DIR = OUTPUT_DIR / "images"
     GOOGLE_IMAGES_DIR = SOURCE_DIR / "google_images"
     JUST_EAT_VENUES_PATH = SOURCE_DIR / "just_eat_venues.json"
+    JUST_EAT_VENUES_SPLIT_DIR = SOURCE_DIR / "just_eat_venues_split"
 
     # Scraper Configuration
     SCRAPER_USE_MOCK = os.getenv("SCRAPER_USE_MOCK", "False").lower() == "true"

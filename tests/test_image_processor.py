@@ -2,7 +2,8 @@ import pytest
 import os
 
 try:
-    from src.engine.image_processor import ImageProcessor
+    import torch
+    from transformers import CLIPProcessor
     HAS_DEPS = True
 except ImportError:
     HAS_DEPS = False

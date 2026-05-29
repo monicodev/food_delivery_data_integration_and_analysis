@@ -110,7 +110,8 @@ class TestMatcherMissingData(unittest.TestCase):
         matcher = Matcher(
             db_path=self.db_path,
             google_venues_path="/nonexistent/file.json",
-            je_venues_path="/nonexistent/je.json"
+            je_venues_path="/nonexistent/je.json",
+            je_venues_split_dir="/nonexistent/split/"
         )
         result = matcher.load_je_venues()
         self.assertEqual(result, [])
@@ -119,7 +120,8 @@ class TestMatcherMissingData(unittest.TestCase):
         matcher = Matcher(
             db_path=self.db_path,
             google_venues_path="/nonexistent/file.json",
-            je_venues_path="/nonexistent/je.json"
+            je_venues_path="/nonexistent/je.json",
+            je_venues_split_dir="/nonexistent/split/"
         )
         matcher.run_matching()
 

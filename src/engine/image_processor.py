@@ -1,16 +1,27 @@
+from __future__ import annotations
+
 import os
 import csv
 import time
-import numpy as np
-import torch
-from PIL import Image
-from transformers import CLIPProcessor, CLIPModel
 import json
 import logging
+import numpy as np
 import requests
 from typing import Optional, Dict, Any, List, Tuple
 from src.config import Config
 from src.database.init_db import get_session, ImageDetection
+
+try:
+    import torch
+    from PIL import Image
+    from transformers import CLIPProcessor, CLIPModel
+    _HAS_ML_DEPS = True
+except ImportError:
+    torch = None
+    Image = None
+    CLIPProcessor = None
+    CLIPModel = None
+    _HAS_ML_DEPS = False
 
 logger = logging.getLogger(__name__)
 
@@ -20,15 +31,20 @@ class ImageProcessor:
         self.db_path = db_path or str(Config.DB_PATH)
         self.image_root = image_root or str(Config.GOOGLE_IMAGES_DIR)
 
-        try:
-            self.device = "cpu"
-            self.model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32").to(self.device)
-            self.processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
-            logger.info("ImageProcessor: CLIP model loaded successfully on CPU")
-        except Exception as e:
-            logger.error("ImageProcessor: Failed to load CLIP model: %s", e)
+        if not _HAS_ML_DEPS:
+            logger.warning("torch / transformers / Pillow not installed. Image processing unavailable.")
             self.model = None
             self.processor = None
+        else:
+            try:
+                self.device = "cpu"
+                self.model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32").to(self.device)
+                self.processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+                logger.info("ImageProcessor: CLIP model loaded successfully on CPU")
+            except Exception as e:
+                logger.error("ImageProcessor: Failed to load CLIP model: %s", e)
+                self.model = None
+                self.processor = None
 
         self._ensure_detections_table()
         self.food_categories = self._load_categories_from_taxonomy() or list(Config.FOOD_CATEGORIES)

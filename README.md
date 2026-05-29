@@ -28,46 +28,56 @@ The pipeline follows a layered architecture:
 ### 1. Clone and Environment Preparation
 Navigate to the project root and install the required dependencies:
 ```bash
-# Install core dependencies
-python3 -m pip install fastapi uvicorn sqlalchemy pandas openpyxl sentence-transformers opencv-python pillow rapidfuzz scikit-learn torch python-dotenv
+# Install core dependencies (enough for entity resolution + keyword classification)
+python3 -m pip install fastapi uvicorn sqlalchemy pandas openpyxl rapidfuzz scikit-learn python-dotenv
 
-# Install Playwright browsers for scraping
-python3 -m playwright install chromium
+# Install ML dependencies only if running semantic classification or image processing
+# python3 -m pip install sentence-transformers opencv-python pillow torch
+
+# Install Playwright browsers for scraping (only if running the scraper)
+# python3 -m playwright install chromium
 ```
 
 **Note**: You can customize the pipeline behavior (e.g., database path, scraper mode) by copying `.env.example` to `.env` and adjusting values.
 
-### 2. Initialize the Database
-Run the initialization script to create the SQLite database and populate the food taxonomy:
+
+#### **(Optional) Scrape Fresh Data**
+If you want to scrape Just Eat instead of using the bundled dataset:
 ```bash
-python3 src/database/init_db.py
+python3 src/scraper/main.py
+```
+
+
+### 2. Import Data (Skip the Scraper)
+The dataset (`2696 Just Eat venues`, `22991 Google venues`) is provided as JSON files. Import venues, menu items, and the food taxonomy into the database (this also initializes the database automatically):
+
+```bash
+# Import the venues in one go (~14s)
+python3 src/engine/main.py --import-venues
+```
+
+```bash
+# Import taxonomy:
+python3 src/engine/main.py --import-taxonomy
 ```
 
 ### 3. Running the Pipeline (Step-by-Step)
 
-#### **Step A: Scrape Data**
-Extract data from `source/just_eat_urls.json` and save both JSON files and SQLite entries:
-```bash
-python3 src/scraper/main.py
-```
-Use mock mode for testing without a live website:
-```bash
-python3 src/scraper/main.py --mock
-```
-
-#### **Step B: Entity Resolution**
-Match Just Eat venues with Google Venues using the hybrid scoring engine:
+#### **Step A: Entity Resolution**
+Match Just Eat venues with Google Venues using the hybrid scoring engine (name similarity + geospatial proximity):
 ```bash
 python3 src/engine/main.py
 ```
+Progress is logged every ~50 venues during the ~10-minute matching process. Results are written to `source/output/matches.json` and persisted in the database.
 
-#### **Step C: Menu Classification**
-Classify menu items into the taxonomy hierarchy using semantic embeddings:
+#### **Step B: Menu Classification**
+Classify menu items into the taxonomy hierarchy using keyword matching (fallback, no ML deps required):
 ```bash
 python3 src/engine/main.py --classify
 ```
+With ML dependencies installed (sentence-transformers + torch), uses semantic embeddings instead.
 
-#### **Step D: Image Processing (POC)**
+#### **Step C: Image Processing (POC)**
 Process images in `source/google_images/` to identify food concepts:
 ```bash
 python3 src/engine/main.py --process-images
@@ -93,6 +103,16 @@ The dashboard exposes the following API endpoints:
 
 The dashboard includes an **interactive venue map** using Leaflet.js that shows matched (green) and unmatched (red) venues with popup information.
 
+### Git & Large Files
+The original `source/just_eat_venues.json` (186MB) exceeds GitHub's recommended size. The dataset is split into 3 parts in `source/just_eat_venues_split/`. Before pushing to GitHub:
+
+```bash
+# Remove the original large file (keep only the splits)
+rm source/just_eat_venues.json
+```
+
+The unified loader in `src/engine/venue_loader.py` transparently reads from the split directory when the single file is absent.
+
 ### 5. Running the Tests
 Run the unit test suite to verify core logic:
 ```bash
@@ -101,6 +121,19 @@ python3 -m pytest tests/ -v
 Tests are skipped when optional dependencies (sentence-transformers, OpenCV, Playwright, httpx) are not installed.
 
 ### 6. Advanced Features
+
+#### Venue Import from JSON
+Instead of running the scraper, import the pre-scraped Just Eat dataset directly:
+```bash
+python3 src/engine/main.py --import-venues
+```
+This reads from `source/just_eat_venues.json` or `source/just_eat_venues_split/` and populates the `venues_je`, `menu_items`, and `food_taxonomy` tables.
+
+#### Taxonomy Import
+Import the food taxonomy Excel file separately:
+```bash
+python3 src/engine/main.py --import-taxonomy
+```
 
 #### Image Evaluation Metrics
 The `ImageProcessor` includes an evaluation mode that computes:
@@ -165,21 +198,23 @@ python3 scripts/check_columns.py
 
 ### 8. Output Data
 Pipeline outputs are written to:
-- **Scraped venues**: `source/output/venues/{id}.json` (rich JSON matching Just Eat example schema)
 - **Entity resolution matches**: `source/output/matches.json`
+- **Unmatched venue report**: `source/output/unmatched_venues.json`
 - **Classifications**: `source/output/classifications.json` (includes Name, Parent, Family)
 - **Image detections**: `source/output/images/{cid}/{cid}_results.json` and `source/output/images/{cid}/{cid}_results.csv`
 
 ## Project Structure
-- `source/`: The source of truth for real data (`just_eat_urls.json`, `google_venues.json`) and processed output.
+- `source/`: Source data files (`google_venues.json`, `just_eat_venues_split/`) and processed output.
+- `source/just_eat_venues_split/`: Just Eat venues dataset split into 3 parts for GitHub compatibility.
 - `src/api/`: FastAPI backend and analytics endpoints.
 - `src/database/`: Database initialization and schema management (SQLAlchemy models).
 - `src/dashboard/`: Vue.js frontend (HTML/JS).
-- `src/engine/`: The "intelligence" layer (ER, Classifier, Image Processor).
+- `src/engine/`: The "intelligence" layer (ER, Classifier, Image Processor, Venue Loader).
+- `src/engine/venue_loader.py`: Unified loader for single-file or split JSON directories.
 - `src/scraper/`: Web scraping module (Playwright-based crawler).
+- `src/scripts/`: Utility scripts (e.g., `split_venues.py` to split large JSON files).
 - `tests/`: Automated unit tests for all modules (116+ tests).
 - `screenshots/`: Dashboard screenshots (add your own after running).
-- `scripts/`: Utility scripts (e.g., column check).
 
 ## Known Limitations
 
@@ -187,7 +222,7 @@ Pipeline outputs are written to:
 - **CSS selectors are fragile**: The primary extraction path uses JSON-LD structured data. CSS selectors are a fallback and may break on site redesigns.
 - **Single-threaded scraping**: Venues are processed sequentially with rate limiting (~5-10s per venue). No parallel or distributed scraping.
 - **City detection uses a known list**: The matcher identifies cities by word-boundary matching against `Config.KNOWN_CITIES` (31 European cities). Extend this list for venues outside those cities.
-- **torch + transformers are heavy (~1.5GB)**: Listed as optional dependencies (`pip install .[ml]`). The classifier falls back to keyword matching without them.
+- **torch + transformers are heavy (~1.5GB)**: Listed as optional dependencies (`pip install .[ml]`). Entity resolution and keyword classification work without them — lazy imports prevent import errors when torch is missing.
 - **Dashboard requires internet**: Vue 3, Chart.js, Tailwind, and Leaflet are loaded from CDN. No offline fallback.
 - **No ground truth for image evaluation**: The image processor produces predictions and latency benchmarks, but accuracy metrics require manually-provided labels.
 - **Only the best match is persisted**: Entity resolution computes top candidates internally, but only the single best match per venue is stored (no audit trail for manual threshold tuning).

@@ -1,10 +1,12 @@
 import json
 import os
 import re
+import time
 import uuid
 import logging
 from typing import List, Dict, Any, Optional
 from src.engine.er_engine import EREngine
+from src.engine.venue_loader import load_je_venues_data
 from src.config import Config
 from src.database.init_db import get_session, VenueGoogle, Match as DBMatch
 logger = logging.getLogger(__name__)
@@ -13,42 +15,37 @@ logger = logging.getLogger(__name__)
 class Matcher:
     def __init__(self, db_path: Optional[str] = None, google_venues_path: Optional[str] = None,
                  weight_name: Optional[float] = None, weight_geo: Optional[float] = None,
-                 je_venues_path: Optional[str] = None):
+                 je_venues_path: Optional[str] = None, je_venues_split_dir: Optional[str] = None):
         self.db_path = db_path or str(Config.DB_PATH)
         self.google_venues_path = google_venues_path or str(Config.GOOGLE_VENUES_PATH)
         self.je_venues_path = je_venues_path or str(Config.JUST_EAT_VENUES_PATH)
+        self.je_venues_split_dir = je_venues_split_dir or str(Config.JUST_EAT_VENUES_SPLIT_DIR)
         self.engine = EREngine(
             weight_name=weight_name if weight_name is not None else Config.ER_WEIGHT_NAME,
             weight_geo=weight_geo if weight_geo is not None else Config.ER_WEIGHT_GEO
         )
 
     def load_je_venues(self) -> List[Dict[str, Any]]:
-        if not os.path.exists(self.je_venues_path):
-            logger.warning("JE venues file not found: %s", self.je_venues_path)
+        data = load_je_venues_data(self.je_venues_path, self.je_venues_split_dir)
+        if not data:
             return []
         venues = []
-        try:
-            with open(self.je_venues_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                for venue_id, venue in data.items():
-                    addr = venue.get("address", {})
-                    location = addr.get("location") if addr else None
-                    coords = location.get("coordinates", [None, None]) if location else [None, None]
-                    venue_name = venue.get("name")
-                    if not venue_name:
-                        logger.warning("JE venue %s has no name, skipping", venue_id)
-                        continue
-                    venues.append({
-                        "id": venue_id,
-                        "name": venue_name,
-                        "address": addr.get("firstLine", "") if addr else "",
-                        "city": addr.get("city", "") if addr else "",
-                        "latitude": float(coords[1]) if coords and coords[1] is not None else None,
-                        "longitude": float(coords[0]) if coords and coords[0] is not None else None
-                    })
-            return venues
-        except Exception as e:
-            logger.error("Error loading JE venues from JSON: %s", e)
+        for venue_id, venue in data.items():
+            addr = venue.get("address", {})
+            location = addr.get("location") if addr else None
+            coords = location.get("coordinates", [None, None]) if location else [None, None]
+            venue_name = venue.get("name")
+            if not venue_name:
+                logger.warning("JE venue %s has no name, skipping", venue_id)
+                continue
+            venues.append({
+                "id": venue_id,
+                "name": venue_name,
+                "address": addr.get("firstLine", "") if addr else "",
+                "city": addr.get("city", "") if addr else "",
+                "latitude": float(coords[1]) if coords and coords[1] is not None else None,
+                "longitude": float(coords[0]) if coords and coords[0] is not None else None
+            })
         return venues
 
     @staticmethod
@@ -189,8 +186,11 @@ class Matcher:
         unmatched_ids = []
         match_scores = []
         total_comparisons = 0
+        total_je = len(je_venues)
+        log_interval = max(1, total_je // 50)  # log ~50 times during processing
+        t_start = time.time()
 
-        for je in je_venues:
+        for idx, je in enumerate(je_venues):
             best_score = 0.0
             best_google_id = None
             je_city_block = je.get("city", "") or ""
@@ -210,6 +210,18 @@ class Matcher:
                 if score > best_score:
                     best_score = score
                     best_google_id = google["id"]
+            elapsed = time.time() - t_start
+            if (idx + 1) % log_interval == 0:
+                rate = (idx + 1) / elapsed if elapsed > 0 else 0
+                remaining = (total_je - idx - 1) / rate if rate > 0 else 0
+                logger.info(
+                    "Progress: %d/%d JE venues (%.1f%%) — %d comparisons — "
+                    "elapsed %dm%02ds — ETA %dm%02ds",
+                    idx + 1, total_je, (idx + 1) / total_je * 100,
+                    total_comparisons,
+                    int(elapsed // 60), int(elapsed % 60),
+                    int(remaining // 60), int(remaining % 60),
+                )
             if best_score >= threshold and best_google_id:
                 best_matches[je["id"]] = {
                     "je_venue_id": je["id"],
@@ -252,17 +264,21 @@ class Matcher:
         logger.info("Total pairwise comparisons: %d", total_comparisons)
 
     def _populate_venues_google(self, google_venues: List[Dict[str, Any]]):
+        from sqlalchemy.dialects.sqlite import insert as sqlite_insert
         session = get_session(self.db_path)
         try:
-            for v in google_venues:
-                venue = VenueGoogle(
-                    id=v["id"],
-                    name=v["name"],
-                    address=v.get("address", ""),
-                    latitude=v.get("latitude"),
-                    longitude=v.get("longitude")
-                )
-                session.merge(venue)
+            stmt = sqlite_insert(VenueGoogle).values([
+                {
+                    "id": v["id"],
+                    "name": v["name"],
+                    "address": v.get("address", ""),
+                    "latitude": v.get("latitude"),
+                    "longitude": v.get("longitude"),
+                }
+                for v in google_venues
+            ])
+            stmt = stmt.on_conflict_do_nothing()
+            session.execute(stmt)
             session.commit()
             logger.info("Populated %d venues in venues_google table.", len(google_venues))
         except Exception as e:

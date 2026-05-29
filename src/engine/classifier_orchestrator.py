@@ -275,6 +275,9 @@ class ClassifierOrchestrator:
 
     def run_classification(self, export_json: bool = True, force_reclassify: bool = False,
                             batch_size: int = 500):
+        from src.database.init_db import init_db
+        init_db(db_path=self.db_path)
+
         logger.info("--- Starting Classification Orchestration ---")
 
         taxonomy = self._load_taxonomy()
