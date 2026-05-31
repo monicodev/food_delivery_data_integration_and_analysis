@@ -1,8 +1,8 @@
 import os
 import json
 import logging
-import numpy as np
-from typing import List, Dict, Any, Optional
+import unicodedata
+from typing import List, Dict, Any
 from sqlalchemy import text
 from src.config import Config
 from src.database.init_db import get_session, FoodTaxonomy, MenuItem, Classification
@@ -10,94 +10,85 @@ from src.database.init_db import get_session, FoodTaxonomy, MenuItem, Classifica
 logger = logging.getLogger(__name__)
 
 
+def _norm(word: str) -> str:
+    return unicodedata.normalize('NFKD', word).encode('ascii', 'ignore').decode('ascii')
+
+
+ALIASES = {
+    "pollo": "chicken",
+    "cerveza": "beer",
+    "hamburguesa": "burger",
+    "queso": "cheese",
+    "ensalada": "salads",
+    "patatas": "fries",
+    "patata": "fries",
+    "atún": "tuna",
+    "atun": "tuna",
+    "zumo": "juice",
+    "ternera": "beef",
+    "bocadillo": "sandwich",
+    "refresco": "soft drinks",
+    "cola": "soft drinks",
+    "coca": "soft drinks",
+    "fanta": "soft drinks",
+    "naranja": "fruit",
+    "limón": "fruit",
+    "limon": "fruit",
+    "alitas": "chicken",
+    "costillas": "pork",
+    "cerdo": "pork",
+    "conejo": "rabbit",
+    "salsa": "sauces",
+    "arroz": "paella",
+    "fruta": "fruit",
+    "legumbres": "legumes",
+    "helado": "ice cream",
+    "pizza": "pizza",
+    "sopa": "vegetable soups and creams",
+    "crema": "vegetable soups and creams",
+    "verduras": "vegetable soups and creams",
+}
+
+
 class ClassifierOrchestrator:
-    def __init__(self, db_path: str, confidence_threshold: float = 0.5):
+    def __init__(self, db_path: str):
         self.db_path = db_path
-        self.confidence_threshold = confidence_threshold
-        self._classifier = None
 
-    @property
-    def classifier(self):
-        if self._classifier is None:
-            try:
-                from src.engine.classifier import TextClassifier
-                self._classifier = TextClassifier()
-            except Exception as e:
-                logger.error("Failed to load TextClassifier: %s", e)
-                self._classifier = None
-        return self._classifier
-
-    def _get_embedding_cache_path(self) -> str:
-        taxonomy_path = Config.TAXONOMY_EXCEL_PATH
-        embedding_dir = os.path.join(Config.OUTPUT_DIR, "embeddings")
-        os.makedirs(embedding_dir, exist_ok=True)
-        mtime = os.path.getmtime(taxonomy_path) if os.path.exists(taxonomy_path) else "0"
-        safe_name = f"taxonomy_embeddings_{int(mtime)}"
-        return {
-            "embeddings": os.path.join(embedding_dir, f"{safe_name}.npy"),
-            "ids": os.path.join(embedding_dir, f"{safe_name}_ids.json"),
-        }
-
-    def _load_or_compute_embeddings(self, taxonomy_ids: List[str], taxonomy_texts: List[str]) -> np.ndarray:
-        cache = self._get_embedding_cache_path()
-        embed_path = cache["embeddings"]
-        ids_path = cache["ids"]
-
-        if os.path.exists(embed_path) and os.path.exists(ids_path):
-            try:
-                with open(ids_path, 'r') as f:
-                    cached_ids = json.load(f)
-                if cached_ids == taxonomy_ids:
-                    cached = np.load(embed_path)
-                    if cached.shape[0] == len(taxonomy_ids):
-                        logger.info("Loaded cached taxonomy embeddings (%d nodes)", len(taxonomy_ids))
-                        return cached
-            except Exception as e:
-                logger.warning("Could not load cached embeddings: %s", e)
-
-        logger.info("Computing taxonomy embeddings for %d nodes...", len(taxonomy_ids))
-        clf = self.classifier
-        if clf is None:
-            raise RuntimeError("Classifier unavailable")
-
-        embeddings = clf.encode(taxonomy_texts)
-
-        try:
-            np.save(embed_path, embeddings)
-            with open(ids_path, 'w') as f:
-                json.dump(taxonomy_ids, f)
-            logger.info("Saved taxonomy embeddings to cache")
-
-            # Clean old cache files for this taxonomy
-            embedding_dir = os.path.dirname(embed_path)
-            for fname in os.listdir(embedding_dir):
-                if fname.startswith("taxonomy_embeddings_") and fname != os.path.basename(embed_path) and fname != os.path.basename(ids_path):
-                    old_path = os.path.join(embedding_dir, fname)
-                    try:
-                        os.remove(old_path)
-                        logger.debug("Removed old cache file: %s", old_path)
-                    except OSError:
-                        pass
-        except Exception as e:
-            logger.warning("Could not cache embeddings: %s", e)
-
-        return embeddings
+    def _build_alias_map(self, taxonomy: List[Dict[str, Any]]) -> Dict[str, str]:
+        name_to_id = {t["text"].lower(): t["id"] for t in taxonomy}
+        alias_map = {}
+        for alias, category_name in ALIASES.items():
+            key = category_name.lower()
+            if key in name_to_id:
+                alias_map[_norm(alias)] = name_to_id[key]
+        return alias_map
 
     @staticmethod
     def _word_matches(tax_word: str, item_words: set) -> bool:
         if tax_word in item_words:
             return True
+        import unicodedata
+        tax_norm = unicodedata.normalize('NFKD', tax_word).encode('ascii', 'ignore').decode('ascii')
+        for iw in item_words:
+            iw_norm = unicodedata.normalize('NFKD', iw).encode('ascii', 'ignore').decode('ascii')
+            if tax_norm == iw_norm:
+                return True
+            if len(tax_word) >= 4 and tax_norm in iw_norm:
+                return True
         if len(tax_word) >= 4:
+            from rapidfuzz import fuzz
             for iw in item_words:
-                if iw.startswith(tax_word) or tax_word.startswith(iw):
+                if fuzz.ratio(tax_word, iw) >= 80:
                     return True
         return False
 
-    def _keyword_fallback_classify(self, item_text: str, taxonomy: List[Dict[str, Any]]) -> tuple:
+    def _classify_item(self, item_text: str, taxonomy: List[Dict[str, Any]],
+                        alias_map: Dict[str, str] = None) -> tuple:
         item_lower = item_text.lower()
         item_words = set(w.strip(".,!?()[]{}'\"") for w in item_lower.split())
         best_score = 0.0
         best_id = "unknown"
+
         for entry in taxonomy:
             tax_text = entry["text"].lower()
             tax_words = [w.strip(".,!?()[]{}'\"-") for w in tax_text.split() if w.strip(".,!?()[]{}'\"-")]
@@ -108,6 +99,13 @@ class ClassifierOrchestrator:
             if score > best_score:
                 best_score = score
                 best_id = entry["id"]
+
+        if best_score < 1.0 and alias_map:
+            for iw in item_words:
+                iw_norm = _norm(iw)
+                if iw_norm in alias_map:
+                    return alias_map[iw_norm], 1.0
+
         return best_id, best_score
 
     def _load_taxonomy(self) -> List[Dict[str, Any]]:
@@ -117,21 +115,9 @@ class ClassifierOrchestrator:
             rows = session.query(FoodTaxonomy).all()
             for row in rows:
                 name_val = row.name or ""
-                parent_val = row.parent or ""
-                family_val = row.family or ""
-
-                if parent_val and family_val:
-                    text = f"{name_val} ({parent_val} - {family_val})"
-                elif parent_val:
-                    text = f"{name_val} ({parent_val})"
-                elif family_val:
-                    text = f"{name_val} ({family_val})"
-                else:
-                    text = name_val
-
                 taxonomy.append({
                     "id": row.category_uidentifier,
-                    "text": text
+                    "text": name_val
                 })
         except Exception as e:
             logger.error("Error loading taxonomy from DB: %s", e)
@@ -308,58 +294,52 @@ class ClassifierOrchestrator:
             return
 
         logger.info("Loaded %d taxonomy nodes and %d unclassified items.", len(taxonomy), len(items))
-
-        taxonomy_ids = [t["id"] for t in taxonomy]
-        taxonomy_texts = [t["text"] for t in taxonomy]
-
-        use_semantic = self.classifier is not None
-        if use_semantic:
-            try:
-                taxonomy_embeddings = self._load_or_compute_embeddings(taxonomy_ids, taxonomy_texts)
-            except Exception as e:
-                logger.warning("Semantic classification unavailable, falling back to keyword matching: %s", e)
-                use_semantic = False
+        alias_map = self._build_alias_map(taxonomy)
+        logger.info("Loaded %d aliases.", len(alias_map))
 
         results = []
         total_classified = 0
-        logger.info("Classifying %d items in batches of %d using %s...",
-                     len(items), batch_size, "semantic" if use_semantic else "keyword fallback")
+        logger.info("Classifying %d items in batches of %d using keyword matching...",
+                     len(items), batch_size)
 
+        num_batches = (len(items) + batch_size - 1) // batch_size
+        log_interval = max(1, num_batches // 50)
+        import time
+        t_start = time.time()
         for batch_start in range(0, len(items), batch_size):
             batch = items[batch_start:batch_start + batch_size]
             batch_results = []
-            for item in batch:
-                if use_semantic:
-                    try:
-                        category_id, confidence = self.classifier.classify(
-                            item["text"],
-                            taxonomy_embeddings,
-                            taxonomy_ids
-                        )
-                    except Exception as e:
-                        logger.warning("Classification failed for item %s, using fallback: %s", item["id"], e)
-                        category_id, confidence = self._keyword_fallback_classify(item["text"], taxonomy)
-                else:
-                    category_id, confidence = self._keyword_fallback_classify(item["text"], taxonomy)
 
-                if confidence >= self.confidence_threshold:
+            for item in batch:
+                category_id, confidence = self._classify_item(item["text"], taxonomy, alias_map)
+                if confidence >= 1.0:
                     batch_results.append({
                         "menu_item_id": item["id"],
                         "taxonomy_id": category_id,
                         "confidence": confidence
                     })
 
-            # Persist after each batch to avoid data loss on crash
             if batch_results:
                 self._persist_classifications(batch_results)
                 total_classified += len(batch_results)
-                logger.info("Batch %d/%d: classified %d items (cumulative: %d)",
-                             batch_start // batch_size + 1,
-                             (len(items) + batch_size - 1) // batch_size,
-                             len(batch_results), total_classified)
+
             results.extend(batch_results)
 
-        logger.info("Successfully classified %d items (threshold: %.2f).", total_classified, self.confidence_threshold)
+            batch_num = batch_start // batch_size + 1
+            if batch_num % log_interval == 0:
+                elapsed = time.time() - t_start
+                rate = batch_num / elapsed if elapsed > 0 else 0
+                remaining = (num_batches - batch_num) / rate if rate > 0 else 0
+                logger.info(
+                    "Progress: %d/%d batches (%.0f%%) — %d classified — "
+                    "elapsed %dm%02ds — ETA %dm%02ds",
+                    batch_num, num_batches, batch_num / num_batches * 100,
+                    total_classified,
+                    int(elapsed // 60), int(elapsed % 60),
+                    int(remaining // 60), int(remaining % 60),
+                )
+
+        logger.info("Successfully classified %d items.", total_classified)
 
         if export_json:
             output_dir = str(Config.OUTPUT_DIR)

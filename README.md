@@ -6,7 +6,7 @@ An end-to-end data pipeline designed to scrape, match, classify, and visualize r
 This project automates the integration of disparate food delivery datasets using a modern Python/FastAPI backend and a lightweight Vue.js dashboard. It features:
 - **Web Scraping**: Automated extraction of Just Eat venue and menu data via Playwright.
 - **Entity Resolution**: A hybrid algorithm matching Just Eat venues to Google Maps via name similarity (RapidFuzz with token-level comparison), geospatial proximity (Haversine + geo-grid pre-filtering), and address-based score boosting.
-- **Text Classification**: Semantic mapping of menu items to a hierarchical food taxonomy using Sentence-Transformers.
+- **Text Classification**: Keyword-based mapping of menu items to a hierarchical food taxonomy with fuzzy matching, accent normalization, and Spanish alias support.
 - **Image Intelligence**: A CPU-optimized Vision POC using CLIP to identify food concepts in images.
 - **Analytics Dashboard**: An interactive interface for on-demand KPI monitoring and visualization.
 
@@ -29,10 +29,10 @@ The pipeline follows a layered architecture:
 Navigate to the project root and install the required dependencies:
 ```bash
 # Install core dependencies (enough for entity resolution + keyword classification)
-python3 -m pip install fastapi uvicorn sqlalchemy pandas openpyxl rapidfuzz scikit-learn python-dotenv
+python3 -m pip install fastapi uvicorn sqlalchemy pandas openpyxl rapidfuzz python-dotenv
 
-# Install ML dependencies only if running semantic classification or image processing
-# python3 -m pip install sentence-transformers opencv-python pillow torch
+# Install ML dependencies only if running image processing
+# python3 -m pip install opencv-python pillow torch
 
 # Install Playwright browsers for scraping (only if running the scraper)
 # python3 -m playwright install chromium
@@ -44,21 +44,20 @@ python3 -m pip install fastapi uvicorn sqlalchemy pandas openpyxl rapidfuzz scik
 #### **(Optional) Scrape Fresh Data**
 If you want to scrape Just Eat instead of using the bundled dataset:
 ```bash
-python3 src/scraper/main.py
+python3 -m src.scraper.main
 ```
 
+```bash
+# Import taxonomy:
+python3 -m src.engine.main --import-taxonomy
+```
 
 ### 2. Import Data (Skip the Scraper)
 The dataset (`2696 Just Eat venues`, `22991 Google venues`) is provided as JSON files. Import venues, menu items, and the food taxonomy into the database (this also initializes the database automatically):
 
 ```bash
-# Import the venues in one go (~14s)
-python3 src/engine/main.py --import-venues
-```
-
-```bash
-# Import taxonomy:
-python3 src/engine/main.py --import-taxonomy
+# Import the venues in one go
+python3 -m src.engine.main --import-venues
 ```
 
 ### 3. Running the Pipeline (Step-by-Step)
@@ -66,27 +65,27 @@ python3 src/engine/main.py --import-taxonomy
 #### **Step A: Entity Resolution**
 Match Just Eat venues with Google Venues using the hybrid scoring engine (name similarity + geospatial proximity):
 ```bash
-python3 src/engine/main.py
+python3 -m src.engine.main
 ```
 Progress is logged every ~50 venues during the matching process (~1 minute with existing matches, ~4 minutes from scratch). Results are written to `source/output/matches.json` and persisted in the database. Existing matches are re-checked with a single comparison per venue instead of a full geo-grid search for optimal performance.
 
 #### **Step B: Menu Classification**
-Classify menu items into the taxonomy hierarchy using keyword matching (fallback, no ML deps required):
+Classify menu items into the taxonomy hierarchy using keyword matching with fuzzy matching, accent normalization, and Spanish alias support:
 ```bash
-python3 src/engine/main.py --classify
+python3 -m src.engine.main --classify
 ```
-With ML dependencies installed (sentence-transformers + torch), uses semantic embeddings instead.
+No ML dependencies required. Runs entirely on CPU with RapidFuzz. Spanish/common aliases (e.g., "pollo" → chicken, "patatas" → fries, "queso" → cheese) are built-in. Force re-classification with `--force`.
 
 #### **Step C: Image Processing (POC)**
 Process images in `source/google_images/` to identify food concepts:
 ```bash
-python3 src/engine/main.py --process-images
+python3 -m src.engine.main --process-images
 ```
 
 ### 4. Launching the Dashboard
 1. **Start the FastAPI Server** (serves both the API and the dashboard):
    ```bash
-   python3 src/api/main.py
+   python3 -m src.api.main
    ```
 2. **View the Dashboard**:
    Open [http://localhost:8000](http://localhost:8000) in your browser.
@@ -130,14 +129,14 @@ Tests are skipped when optional dependencies (sentence-transformers, OpenCV, Pla
 #### Venue Import from JSON
 Instead of running the scraper, import the pre-scraped Just Eat dataset directly:
 ```bash
-python3 src/engine/main.py --import-venues
+python3 -m src.engine.main --import-venues
 ```
 This reads from `source/just_eat_venues.json` or `source/just_eat_venues_split/` and populates the `venues_je`, `menu_items`, and `food_taxonomy` tables.
 
 #### Taxonomy Import
 Import the food taxonomy Excel file separately:
 ```bash
-python3 src/engine/main.py --import-taxonomy
+python3 -m src.engine.main --import-taxonomy
 ```
 
 #### Image Evaluation Metrics
@@ -165,7 +164,7 @@ Requires `GOOGLE_PLACES_API_KEY` environment variable.
 Running `--classify` without `--force` skips already-classified items (resumes from where it left off). Force re-classify all menu items:
 
 ```bash
-python3 src/engine/main.py --classify --confidence-threshold 0.5 --force
+python3 -m src.engine.main --classify --force
 ```
 
 #### Unmatched Venues Report
@@ -233,7 +232,7 @@ Pipeline outputs are written to:
 - **CSS selectors are fragile**: The primary extraction path uses JSON-LD structured data. CSS selectors are a fallback and may break on site redesigns.
 - **Single-threaded scraping**: Venues are processed sequentially with rate limiting (~5-10s per venue). No parallel or distributed scraping.
 - **City detection uses a known list**: The matcher identifies cities by word-boundary matching against `Config.KNOWN_CITIES` (31 European cities). Extend this list for venues outside those cities.
-- **torch + transformers are heavy (~1.5GB)**: Listed as optional dependencies (`pip install .[ml]`). Entity resolution and keyword classification work without them — lazy imports prevent import errors when torch is missing.
+- **torch + transformers are heavy (~1.5GB)**: Listed as optional dependencies (`pip install .[ml]`) only for image processing. Classification is keyword-only and requires zero ML dependencies.
 - **Dashboard requires internet**: Vue 3, Chart.js, Tailwind, and Leaflet are loaded from CDN. No offline fallback.
 - **No ground truth for image evaluation**: The image processor produces predictions and latency benchmarks, but accuracy metrics require manually-provided labels.
 - **Only the best match is persisted**: Entity resolution computes top candidates internally, but only the single best match per venue is stored (no audit trail for manual threshold tuning).

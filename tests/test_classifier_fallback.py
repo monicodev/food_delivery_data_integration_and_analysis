@@ -40,21 +40,24 @@ class TestClassifierFallback(unittest.TestCase):
     def test_keyword_fallback_matches_pizza(self):
         orch = ClassifierOrchestrator(self.db_path)
         taxonomy = orch._load_taxonomy()
-        cat_id, confidence = orch._keyword_fallback_classify("Pepperoni Pizza with cheese", taxonomy)
+        alias_map = orch._build_alias_map(taxonomy)
+        cat_id, confidence = orch._classify_item("Pepperoni Pizza with cheese", taxonomy, alias_map)
         self.assertEqual(cat_id, "pizza-001")
         self.assertGreater(confidence, 0.0)
 
     def test_keyword_fallback_matches_drink(self):
         orch = ClassifierOrchestrator(self.db_path)
         taxonomy = orch._load_taxonomy()
-        cat_id, confidence = orch._keyword_fallback_classify("Coca Cola drink", taxonomy)
+        alias_map = orch._build_alias_map(taxonomy)
+        cat_id, confidence = orch._classify_item("Coca Cola drink", taxonomy, alias_map)
         self.assertEqual(cat_id, "drink-001")
         self.assertGreater(confidence, 0.0)
 
     def test_keyword_fallback_returns_unknown_for_no_match(self):
         orch = ClassifierOrchestrator(self.db_path)
         taxonomy = orch._load_taxonomy()
-        cat_id, confidence = orch._keyword_fallback_classify("xyz123 nothing matches", taxonomy)
+        alias_map = orch._build_alias_map(taxonomy)
+        cat_id, confidence = orch._classify_item("xyz123 nothing matches", taxonomy, alias_map)
         self.assertEqual(cat_id, "unknown")
 
 

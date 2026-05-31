@@ -316,19 +316,24 @@ class Matcher:
     def _populate_venues_google(self, google_venues: List[Dict[str, Any]]):
         from sqlalchemy.dialects.sqlite import insert as sqlite_insert
         session = get_session(self.db_path)
+        batch_size = 500
+        inserted = 0
         try:
-            stmt = sqlite_insert(VenueGoogle).values([
-                {
-                    "id": v["id"],
-                    "name": v["name"],
-                    "address": v.get("address", ""),
-                    "latitude": v.get("latitude"),
-                    "longitude": v.get("longitude"),
-                }
-                for v in google_venues
-            ])
-            stmt = stmt.on_conflict_do_nothing()
-            session.execute(stmt)
+            for i in range(0, len(google_venues), batch_size):
+                batch = google_venues[i:i + batch_size]
+                stmt = sqlite_insert(VenueGoogle).values([
+                    {
+                        "id": v["id"],
+                        "name": v["name"],
+                        "address": v.get("address", ""),
+                        "latitude": v.get("latitude"),
+                        "longitude": v.get("longitude"),
+                    }
+                    for v in batch
+                ])
+                stmt = stmt.on_conflict_do_nothing()
+                session.execute(stmt)
+                inserted += len(batch)
             session.commit()
             logger.info("Populated %d venues in venues_google table.", len(google_venues))
         except Exception as e:

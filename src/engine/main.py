@@ -27,8 +27,6 @@ def main():
                         help="Weight for geospatial similarity (0.0 - 1.0, default: 0.4)")
     parser.add_argument("--classify", action="store_true",
                         help="Run the text classification pipeline")
-    parser.add_argument("--confidence-threshold", type=float, default=0.5,
-                        help="Minimum confidence score for classifying an item (default: 0.5)")
     parser.add_argument("--force", action="store_true",
                         help="Force re-classification of all items (clears existing classifications)")
     parser.add_argument("--process-images", action="store_true",
@@ -79,8 +77,7 @@ def main():
         from src.engine.classifier_orchestrator import ClassifierOrchestrator
         logger.info("--- Starting Classification Pipeline ---")
         try:
-            orchestrator = ClassifierOrchestrator(db_path=args.db_path,
-                                                  confidence_threshold=args.confidence_threshold)
+            orchestrator = ClassifierOrchestrator(db_path=args.db_path)
             orchestrator.run_classification(force_reclassify=args.force)
         except Exception as e:
             logger.critical("FATAL ERROR during classification: %s", e)

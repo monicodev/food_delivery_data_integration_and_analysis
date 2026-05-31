@@ -38,8 +38,8 @@ class TestClassifierReclassification(unittest.TestCase):
         import shutil
         shutil.rmtree(self.tmp_dir)
 
-    def _make_orchestrator(self, threshold=0.1):
-        return ClassifierOrchestrator(self.db_path, confidence_threshold=threshold)
+    def _make_orchestrator(self):
+        return ClassifierOrchestrator(self.db_path)
 
     def test_load_unclassified_only_when_not_forced(self):
         orch = self._make_orchestrator()
@@ -53,7 +53,7 @@ class TestClassifierReclassification(unittest.TestCase):
         self.assertEqual(len(items), 2)
 
     def test_force_reclassify_clears_existing(self):
-        orch = self._make_orchestrator(threshold=0.1)
+        orch = self._make_orchestrator()
         orch.run_classification(export_json=False, force_reclassify=True)
 
         conn = sqlite3.connect(self.db_path)
@@ -64,7 +64,7 @@ class TestClassifierReclassification(unittest.TestCase):
         self.assertGreater(count, 0)
 
     def test_evaluate_returns_metrics_structure(self):
-        orch = self._make_orchestrator(threshold=0.1)
+        orch = self._make_orchestrator()
         result = orch.evaluate({99: "nonexistent"})
         self.assertIsInstance(result, dict)
         self.assertIn("total_items", result)

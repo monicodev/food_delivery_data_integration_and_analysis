@@ -91,7 +91,7 @@ class TestClassifierExport(unittest.TestCase):
             ids = [t["id"] for t in taxonomy]
             self.assertIn("pizza-001", ids)
             self.assertIn("burger-001", ids)
-            self.assertIn("Italian", taxonomy[0]["text"])
+            self.assertEqual(taxonomy[0]["text"], "Pizza")
 
     def test_unclassified_items_query(self):
         from src.engine.classifier_orchestrator import ClassifierOrchestrator

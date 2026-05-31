@@ -7,16 +7,12 @@ dependencies = [
     "uvicorn",
     "pydantic",
     "rapidfuzz",
-    "sentence-transformers",
-    "opencv-python",
-    "pandas",
-    "openpyxl",
     "sqlalchemy",
-    "playwright",
     "python-dotenv",
-    "pillow",
-    "scikit-learn",
+    "playwright",
+    "pandas",
     "numpy",
+    "requests",
 ]
 
 [project.optional-dependencies]
@@ -27,6 +23,7 @@ dev = [
 ml = [
     "torch",
     "transformers",
+    "pillow",
 ]
 
 [build-system]

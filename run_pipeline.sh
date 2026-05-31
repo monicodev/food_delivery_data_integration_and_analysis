@@ -33,44 +33,44 @@ echo "============================================"
 echo "  Food Delivery Pipeline — Full Run"
 echo "============================================"
 
-# Step 0: Initialize database
-echo ""
-echo "[1/5] Initializing database..."
-python3 src/database/init_db.py
-
-# Step 1: Scrape
+# Step 1: Scrape (optional) — populates source/just_eat_venues.json
 if [ "$SKIP_SCRAPE" = false ]; then
     echo ""
-    echo "[2/5] Scraping Just Eat venues..."
-    python3 src/scraper/main.py $MOCK $LOCALE
+    echo "[1/5] Scraping Just Eat venues..."
+    python3 -m src.scraper.main $MOCK $LOCALE
     echo ""
-    echo "[2b/5] Merging venue JSONs into aggregated file..."
+    echo "[1b/5] Merging venue JSONs into aggregated file..."
     python3 scripts/merge_venues.py source/output/venues source/just_eat_venues.json
 else
     echo ""
-    echo "[2/5] SKIPPED: Scraping"
+    echo "[1/5] SKIPPED: Scraping"
 fi
 
-# Step 2: Entity Resolution
+# Step 2: Import venues into the database (idempotent, ~14s)
+echo ""
+echo "[2/5] Importing venues into database..."
+python3 -m src.engine.main --import-venues
+
+# Step 3: Entity Resolution
 echo ""
 echo "[3/5] Running Entity Resolution..."
-python3 src/engine/main.py
+python3 -m src.engine.main
 
-# Step 3: Classification
+# Step 4: Classification
 if [ "$SKIP_CLASSIFY" = false ]; then
     echo ""
     echo "[4/5] Classifying menu items..."
-    python3 src/engine/main.py --classify $FORCE
+    python3 -m src.engine.main --classify $FORCE
 else
     echo ""
     echo "[4/5] SKIPPED: Classification"
 fi
 
-# Step 4: Image Processing
+# Step 5: Image Processing
 if [ "$SKIP_IMAGES" = false ]; then
     echo ""
     echo "[5/5] Processing images..."
-    python3 src/engine/main.py --process-images
+    python3 -m src.engine.main --process-images
 else
     echo ""
     echo "[5/5] SKIPPED: Image Processing"
@@ -79,6 +79,6 @@ fi
 echo ""
 echo "============================================"
 echo "  Pipeline complete! Start the dashboard:"
-echo "  python3 src/api/main.py"
-echo "  Then open src/dashboard/index.html"
+echo "  python3 -m src.api.main"
+echo "  Then open http://localhost:8000"
 echo "============================================"
