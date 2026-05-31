@@ -5,7 +5,7 @@ An end-to-end data pipeline designed to scrape, match, classify, and visualize r
 ## Overview
 This project automates the integration of disparate food delivery datasets using a modern Python/FastAPI backend and a lightweight Vue.js dashboard. It features:
 - **Web Scraping**: Automated extraction of Just Eat venue and menu data via Playwright.
-- **Entity Resolution**: A hybrid algorithm matching Just Eat venues to Google Maps via name similarity (RapidFuzz) and geospatial proximity (Haversine).
+- **Entity Resolution**: A hybrid algorithm matching Just Eat venues to Google Maps via name similarity (RapidFuzz with token-level comparison), geospatial proximity (Haversine + geo-grid pre-filtering), and address-based score boosting.
 - **Text Classification**: Semantic mapping of menu items to a hierarchical food taxonomy using Sentence-Transformers.
 - **Image Intelligence**: A CPU-optimized Vision POC using CLIP to identify food concepts in images.
 - **Analytics Dashboard**: An interactive interface for on-demand KPI monitoring and visualization.
@@ -68,7 +68,7 @@ Match Just Eat venues with Google Venues using the hybrid scoring engine (name s
 ```bash
 python3 src/engine/main.py
 ```
-Progress is logged every ~50 venues during the ~10-minute matching process. Results are written to `source/output/matches.json` and persisted in the database.
+Progress is logged every ~50 venues during the matching process (~1 minute with existing matches, ~4 minutes from scratch). Results are written to `source/output/matches.json` and persisted in the database. Existing matches are re-checked with a single comparison per venue instead of a full geo-grid search for optimal performance.
 
 #### **Step B: Menu Classification**
 Classify menu items into the taxonomy hierarchy using keyword matching (fallback, no ML deps required):
@@ -100,6 +100,7 @@ The API exposes the following endpoints:
 - `GET /analytics/venue-density` — Venue and menu item counts
 - `GET /analytics/classification-coverage` — Classification pipeline coverage (% of menu items classified)
 - `GET /analytics/venues` — All venue coordinates with match status (for map)
+- `GET /analytics/venue-images` — Matched JE venues with Google image folders and photo counts
 
 The dashboard includes:
 - **KPI cards** — Total Just Eat venues, matched Google venues, match rate, menu items, and classification coverage.
@@ -170,11 +171,17 @@ python3 src/engine/main.py --classify --confidence-threshold 0.5 --force
 #### Unmatched Venues Report
 After entity resolution, unmatched Just Eat venue IDs are exported to `source/output/unmatched_venues.json`.
 
-#### Entity Resolution Threshold Sensitivity
-The hybrid match score is `S = (w_name * S_name) + (w_geo * S_geo)`. With default weights (0.6 name, 0.4 geo) and threshold (0.70):
-- A perfect name match (`S_name = 1.0`) with missing coordinates gives `S = 0.60` — **below** the threshold
-- A perfect name match at the same location gives `S = 1.0` — confident match
-- Adjust `--threshold` lower if you want looser matching, or tune `--weight-name` / `--weight-geo`
+#### Entity Resolution Details
+The hybrid match score is `S = (w_name * S_name) + (w_geo * S_geo) + address_boost`. With default weights (0.6 name, 0.4 geo) and threshold (0.70):
+
+- Name similarity (`S_name`): Uses RapidFuzz with `token_set_ratio` and `token_sort_ratio` for **word-level comparison** (not character-level). Stop words (business types, legal forms, generic cuisine words) are filtered out before scoring. `partial_ratio` is avoided because it works at the character level, causing false positives like a single letter matching inside any word.
+- Geospatial similarity (`S_geo`): Exponential decay of Haversine distance (`exp(-0.00035 * d)`). Uses a geo-grid pre-filter (0.05° cells, ~5.6km) with a 0.02° distance threshold (~2km) to reduce the candidate pool.
+- Address boost: `+0.15` when street number and name match, `+0.08` when number alone matches.
+
+A perfect name match (`S_name = 1.0`) with missing coordinates gives `S = 0.60` — **below** the threshold.
+A perfect name match at the same location gives `S = 1.0` — confident match.
+
+Adjust `--threshold` lower if you want looser matching, or tune `--weight-name` / `--weight-geo`.
 
 ### Pipeline Orchestration
 Use the pipeline script for end-to-end execution:
@@ -217,7 +224,7 @@ Pipeline outputs are written to:
 - `src/engine/venue_loader.py`: Unified loader for single-file or split JSON directories.
 - `src/scraper/`: Web scraping module (Playwright-based crawler).
 - `src/scripts/`: Utility scripts (e.g., `split_venues.py` to split large JSON files).
-- `tests/`: Automated unit tests for all modules (116+ tests).
+- `tests/`: Automated unit tests for all modules (170+ tests).
 - `screenshots/`: Dashboard screenshots (add your own after running).
 
 ## Known Limitations

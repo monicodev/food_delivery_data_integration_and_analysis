@@ -1,3 +1,6 @@
+import os
+import re
+import json
 import logging
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
@@ -8,9 +11,35 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func, text
 
 from src.config import Config
-from src.database.init_db import get_session, VenueJE, MenuItem, Match, FoodTaxonomy, Classification
+from src.database.init_db import get_session, VenueJE, MenuItem, Match, FoodTaxonomy, Classification, ImageDetection
 
 logger = logging.getLogger(__name__)
+
+
+def _load_place_id_to_cid():
+    path = os.path.join(str(Config.SOURCE_DIR), "google_venues.json")
+    if not os.path.exists(path):
+        logger.warning("google_venues.json not found at %s", path)
+        return {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        mapping = {}
+        cid_re = re.compile(r"cid=(\d+)")
+        for v in data:
+            place_id = v.get("googlePlaceId")
+            url = v.get("googleMapsUrl", "")
+            m = cid_re.search(url)
+            if place_id and m:
+                mapping[place_id] = m.group(1)
+        logger.info("Loaded %d place_id → cid mappings from google_venues.json", len(mapping))
+        return mapping
+    except Exception as e:
+        logger.error("Failed to load google_venues.json: %s", e)
+        return {}
+
+
+PLACE_ID_TO_CID = _load_place_id_to_cid()
 
 app = FastAPI(title="Food Delivery Analytics API")
 
@@ -65,6 +94,14 @@ class VenueCoordinate(BaseModel):
     latitude: Optional[float] = None
     longitude: Optional[float] = None
     is_matched: bool = False
+
+
+class VenueImageInfo(BaseModel):
+    je_venue_id: str
+    je_venue_name: str
+    google_cid: str
+    images: List[str]
+    has_detections: bool = False
 
 
 def _count_je_venues(db: Session) -> int:
@@ -173,6 +210,47 @@ def get_venue_coordinates(db: Session = Depends(get_db)):
         raise HTTPException(status_code=503, detail=f"Database error: {e}")
 
 
+@app.get("/analytics/venue-images", response_model=List[VenueImageInfo])
+def get_venue_images(db: Session = Depends(get_db)):
+    try:
+        matches = db.query(Match.je_venue_id, Match.google_venue_id).all()
+        detected_cids = set(
+            row[0] for row in db.query(func.distinct(ImageDetection.google_cid)).all()
+        )
+        matched_ids = [m.je_venue_id for m in matches]
+        venues_map = {
+            v.id: v.name
+            for v in db.query(VenueJE.id, VenueJE.name).filter(VenueJE.id.in_(matched_ids)).all()
+        }
+        images_dir = str(Config.GOOGLE_IMAGES_DIR)
+        result = []
+        seen_cids = set()
+        for match in matches:
+            google_cid = PLACE_ID_TO_CID.get(match.google_venue_id)
+            if not google_cid or google_cid in seen_cids:
+                continue
+            venue_dir = os.path.join(images_dir, google_cid)
+            if os.path.isdir(venue_dir):
+                images = sorted([
+                    f for f in os.listdir(venue_dir)
+                    if f.lower().endswith(('.jpg', '.jpeg', '.png'))
+                ])
+                if images:
+                    seen_cids.add(google_cid)
+                    result.append(VenueImageInfo(
+                        je_venue_id=match.je_venue_id,
+                        je_venue_name=venues_map.get(match.je_venue_id, "Unknown"),
+                        google_cid=google_cid,
+                        images=images,
+                        has_detections=google_cid in detected_cids
+                    ))
+        return result
+    except Exception as e:
+        logger.error("Error fetching venue images: %s", e)
+        raise HTTPException(status_code=503, detail=f"Database error: {e}")
+
+
+app.mount("/static/images", StaticFiles(directory=str(Config.GOOGLE_IMAGES_DIR)), name="images")
 app.mount("/", StaticFiles(directory="src/api/static", html=True), name="dashboard")
 
 if __name__ == "__main__":

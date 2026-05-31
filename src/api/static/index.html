@@ -101,6 +101,32 @@
         </div>
         <div id="venueMap" style="height: 400px; width: 100%; border-radius: 8px;"></div>
     </div>
+
+    <div v-if="venueImages.length > 0" class="mt-8 bg-white p-6 rounded-lg shadow-md">
+        <h3 class="text-xl font-semibold mb-4 text-gray-700">Venue Images</h3>
+        <p class="text-gray-500 text-sm mb-4">Matched venues with Google Places photos</p>
+
+        <div v-for="venue in venueImages" :key="venue.google_cid" class="mb-6 pb-6 border-b last:border-b-0 last:mb-0 last:pb-0">
+            <div class="flex items-center gap-2 mb-3">
+                <h4 class="text-lg font-medium text-gray-700">{{ venue.je_venue_name }}</h4>
+                <span v-if="venue.has_detections"
+                      class="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded-full">CLIP processed</span>
+            </div>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <div v-for="img in venue.images" :key="img" class="relative group">
+                    <img :src="imageUrl(venue.google_cid, img)"
+                         :alt="venue.je_venue_name"
+                         class="w-full h-32 object-cover rounded-lg shadow hover:shadow-md transition-shadow cursor-pointer"
+                         @click="openImage(venue.google_cid, img)">
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div v-else-if="!loading && venueImages.length === 0" class="mt-8 bg-white p-6 rounded-lg shadow-md">
+        <h3 class="text-xl font-semibold mb-4 text-gray-700">Venue Images</h3>
+        <p class="text-gray-400 text-center py-4">No venue images available. Run the matching pipeline first.</p>
+    </div>
 </div>
 
 <script>
@@ -128,6 +154,8 @@
             const categoriesError = ref(null);
             const mapError = ref(null);
             const mapLoading = ref(false);
+            const venueImages = ref([]);
+            const imagesError = ref(null);
             let categoryChart = null;
             let venueMap = null;
             let mapMarkers = [];
@@ -215,6 +243,26 @@
 
             const refresh = () => {
                 fetchStats();
+                fetchVenueImages();
+            };
+
+            const imageUrl = (googleCid, filename) => API_BASE + '/static/images/' + googleCid + '/' + filename;
+
+            const openImage = (googleCid, filename) => {
+                window.open(imageUrl(googleCid, filename), '_blank');
+            };
+
+            const fetchVenueImages = async () => {
+                try {
+                    const res = await fetch(API_BASE + '/analytics/venue-images');
+                    if (res.ok) {
+                        venueImages.value = await res.json();
+                        imagesError.value = null;
+                    }
+                } catch (err) {
+                    console.error("Failed to fetch venue images:", err);
+                    imagesError.value = "Could not load venue images.";
+                }
             };
 
             const renderChart = (data) => {
@@ -302,13 +350,14 @@
 
             onMounted(() => {
                 fetchStats();
+                fetchVenueImages();
             });
 
             onUnmounted(() => {
                 if (venueMap) venueMap.remove();
             });
 
-            return { stats, density, coverage, error, loading, apiConnected, dbConnected, lastSync, categoriesChartReady, categoriesError, mapError, mapLoading, refresh };
+            return { stats, density, coverage, error, loading, apiConnected, dbConnected, lastSync, categoriesChartReady, categoriesError, mapError, mapLoading, venueImages, imagesError, refresh, imageUrl, openImage };
         }
     }).mount('#app');
 </script>

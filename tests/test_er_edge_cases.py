@@ -30,8 +30,7 @@ class TestEREngineEdgeCases(unittest.TestCase):
         self.assertGreater(score_partial, 0.5)
 
     def test_unicode_normalization(self):
-        # Accented chars decompose and combine: Café → Cafe
-        score = self.engine.calculate_name_similarity("Café", "Cafe")
+        score = self.engine.calculate_name_similarity("José", "Jose")
         self.assertAlmostEqual(score, 1.0)
 
     def test_non_ascii_preserved(self):

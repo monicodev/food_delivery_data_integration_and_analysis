@@ -41,6 +41,7 @@ class Matcher:
             venues.append({
                 "id": venue_id,
                 "name": venue_name,
+                "name_clean": EREngine.clean_name(venue_name),
                 "address": addr.get("firstLine", "") if addr else "",
                 "city": addr.get("city", "") if addr else "",
                 "latitude": float(coords[1]) if coords and coords[1] is not None else None,
@@ -88,6 +89,7 @@ class Matcher:
                     venues.append({
                         "id": vid,
                         "name": name,
+                        "name_clean": EREngine.clean_name(name),
                         "address": raw_addr,
                         "latitude": self._safe_float(v.get("latitude")),
                         "longitude": self._safe_float(v.get("longitude")),
@@ -129,9 +131,9 @@ class Matcher:
         return groups
 
     @staticmethod
-    def _geo_grid_key(lat: Optional[float], lon: Optional[float], cell_size_degrees: float = 0.25) -> str:
+    def _geo_grid_key(lat: Optional[float], lon: Optional[float], cell_size_degrees: float = 0.05) -> str:
         """Assign a venue to a geographic grid cell for spatial pre-filtering.
-        Cell size ~0.25° ≈ 28km at mid-latitudes."""
+        Cell size ~0.05° ≈ 5.6km at mid-latitudes."""
         if lat is None or lon is None:
             return "no_coords"
         cell_lat = round(lat / cell_size_degrees) * cell_size_degrees
@@ -141,7 +143,7 @@ class Matcher:
     def _get_geo_candidates(self, je_lat: Optional[float], je_lon: Optional[float],
                              google_by_grid: Dict[str, List[Dict[str, Any]]],
                              google_venues: List[Dict[str, Any]],
-                             cell_size: float = 0.25) -> List[Dict[str, Any]]:
+                             cell_size: float = 0.05) -> List[Dict[str, Any]]:
         """Get candidate Google venues from the same or adjacent grid cells."""
         if je_lat is None or je_lon is None:
             return google_venues  # fallback: full scan
@@ -175,8 +177,21 @@ class Matcher:
 
         self._populate_venues_google(google_venues)
 
-        google_by_city = self._group_by_city(google_venues)
-        # Build geo-spatial grid index for venues without a known city
+        # Load existing matches for re-check
+        google_by_id: Dict[str, Dict[str, Any]] = {v["id"]: v for v in google_venues}
+        session = get_session(self.db_path)
+        old_matches: Dict[str, Dict[str, Any]] = {}
+        try:
+            for row in session.query(DBMatch).all():
+                old_matches[row.je_venue_id] = {
+                    "google_venue_id": row.google_venue_id,
+                    "similarity_score": row.similarity_score,
+                }
+            logger.info("Loaded %d existing matches for re-check", len(old_matches))
+        finally:
+            session.close()
+
+        # Build geo-spatial grid index
         google_by_grid: Dict[str, List[Dict[str, Any]]] = {}
         for v in google_venues:
             gk = self._geo_grid_key(v.get("latitude"), v.get("longitude"))
@@ -187,50 +202,81 @@ class Matcher:
         match_scores = []
         total_comparisons = 0
         total_je = len(je_venues)
-        log_interval = max(1, total_je // 50)  # log ~50 times during processing
+        log_interval = max(1, total_je // 50)
         t_start = time.time()
+        needs_full_search: List[Dict[str, Any]] = []
 
         for idx, je in enumerate(je_venues):
+            je_id = je["id"]
             best_score = 0.0
             best_google_id = None
-            je_city_block = je.get("city", "") or ""
-            candidates = google_by_city.get(je_city_block, [])
-            if not candidates:
-                logger.debug("JE venue '%s' city '%s' unknown, using geo-grid filtering", je.get("name"), je_city_block)
-                candidates = self._get_geo_candidates(
-                    je.get("latitude"), je.get("longitude"),
-                    google_by_grid, google_venues
-                )
-            for google in candidates:
-                score = self.engine.compute_total_score(
-                    je["name"], je["latitude"], je["longitude"],
-                    google["name"], google["latitude"], google["longitude"]
-                )
-                total_comparisons += 1
-                if score > best_score:
-                    best_score = score
-                    best_google_id = google["id"]
+            is_matched = True
+
+            old = old_matches.get(je_id)
+            if old:
+                gid = old["google_venue_id"]
+                gv = google_by_id.get(gid)
+                if gv:
+                    score = self.engine.compute_total_score_cleaned(
+                        je["name_clean"], je.get("latitude"), je.get("longitude"),
+                        gv["name_clean"], gv.get("latitude"), gv.get("longitude"),
+                        je.get("address", ""), gv.get("address", ""),
+                    )
+                    total_comparisons += 1
+                    if score >= threshold:
+                        best_score = score
+                        best_google_id = gid
+                    else:
+                        is_matched = False
+                else:
+                    is_matched = False
+            else:
+                is_matched = False
+
+            if not is_matched:
+                needs_full_search.append(je)
+                je_lat, je_lon = je.get("latitude"), je.get("longitude")
+                candidates = self._get_geo_candidates(je_lat, je_lon, google_by_grid, google_venues)
+
+                for google in candidates:
+                    g_lat, g_lon = google.get("latitude"), google.get("longitude")
+                    if (je_lat is not None and je_lon is not None
+                            and g_lat is not None and g_lon is not None):
+                        if abs(je_lat - g_lat) > 0.02 or abs(je_lon - g_lon) > 0.02:
+                            continue
+
+                    score = self.engine.compute_total_score_cleaned(
+                        je["name_clean"], je_lat, je_lon,
+                        google["name_clean"], g_lat, g_lon,
+                        je.get("address", ""), google.get("address", "")
+                    )
+                    total_comparisons += 1
+                    if score > best_score:
+                        best_score = score
+                        best_google_id = google["id"]
+
+            if best_score >= threshold and best_google_id:
+                best_matches[je_id] = {
+                    "je_venue_id": je_id,
+                    "google_venue_id": best_google_id,
+                    "similarity_score": best_score
+                }
+                match_scores.append(best_score)
+            else:
+                unmatched_ids.append(je_id)
+
             elapsed = time.time() - t_start
             if (idx + 1) % log_interval == 0:
                 rate = (idx + 1) / elapsed if elapsed > 0 else 0
                 remaining = (total_je - idx - 1) / rate if rate > 0 else 0
                 logger.info(
-                    "Progress: %d/%d JE venues (%.1f%%) — %d comparisons — "
+                    "Progress: %d/%d (%.0f%%) — %d comparisons — "
                     "elapsed %dm%02ds — ETA %dm%02ds",
                     idx + 1, total_je, (idx + 1) / total_je * 100,
                     total_comparisons,
                     int(elapsed // 60), int(elapsed % 60),
                     int(remaining // 60), int(remaining % 60),
                 )
-            if best_score >= threshold and best_google_id:
-                best_matches[je["id"]] = {
-                    "je_venue_id": je["id"],
-                    "google_venue_id": best_google_id,
-                    "similarity_score": best_score
-                }
-                match_scores.append(best_score)
-            else:
-                unmatched_ids.append(je["id"])
 
         # Enforce one-to-one: each Google venue matched to at most one JE venue
         google_used: set = set()
@@ -249,9 +295,11 @@ class Matcher:
 
         if best_matches:
             match_list = list(best_matches.values())
-            self._persist_matches(match_list)
+            stale_ids = set(old_matches) - set(best_matches)
+            self._persist_matches(match_list, stale_ids)
             self._export_matches_json(match_list)
-            logger.info("Successfully persisted %d best matches (threshold: %.2f).", len(match_list), threshold)
+            logger.info("Successfully persisted %d best matches (%d updated, %d stale removed)",
+                         len(match_list), len(best_matches), len(stale_ids))
             if match_scores:
                 logger.info("Match score distribution — min: %.4f, max: %.4f, mean: %.4f",
                             min(match_scores), max(match_scores), sum(match_scores) / len(match_scores))
@@ -261,7 +309,9 @@ class Matcher:
         if unmatched_ids:
             logger.info("Unmatched JE venues (%d): %s", len(unmatched_ids), unmatched_ids[:10])
             self._export_unmatched_json(unmatched_ids)
-        logger.info("Total pairwise comparisons: %d", total_comparisons)
+        rechecked = len(old_matches) - len(needs_full_search)
+        logger.info("Total: %d JE venues — %d comparisons (re-checked %d, full-search %d)",
+                     total_je, total_comparisons, rechecked, len(needs_full_search))
 
     def _populate_venues_google(self, google_venues: List[Dict[str, Any]]):
         from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -287,20 +337,28 @@ class Matcher:
         finally:
             session.close()
 
-    def _persist_matches(self, matches: List[Dict[str, Any]]):
+    def _persist_matches(self, matches: List[Dict[str, Any]], stale_je_ids: set):
         session = get_session(self.db_path)
         try:
+            if stale_je_ids:
+                session.query(DBMatch).filter(
+                    DBMatch.je_venue_id.in_(stale_je_ids)
+                ).delete(synchronize_session=False)
             for m in matches:
-                match = DBMatch(
-                    je_venue_id=m["je_venue_id"],
-                    google_venue_id=m["google_venue_id"],
-                    similarity_score=m["similarity_score"]
-                )
-                session.merge(match)
+                existing = session.query(DBMatch).filter_by(je_venue_id=m["je_venue_id"]).first()
+                if existing:
+                    existing.google_venue_id = m["google_venue_id"]
+                    existing.similarity_score = m["similarity_score"]
+                else:
+                    session.add(DBMatch(
+                        je_venue_id=m["je_venue_id"],
+                        google_venue_id=m["google_venue_id"],
+                        similarity_score=m["similarity_score"]
+                    ))
             session.commit()
         except Exception as e:
             session.rollback()
-            logger.error("Error persisting matches to DB: %s", e)
+            logger.error("Error persisting matches: %s", e)
         finally:
             session.close()
 
