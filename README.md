@@ -8,7 +8,7 @@ This project automates the integration of disparate food delivery datasets using
 - **Entity Resolution**: A hybrid algorithm matching Just Eat venues to Google Maps via name similarity (RapidFuzz) and geospatial proximity (Haversine).
 - **Text Classification**: Semantic mapping of menu items to a hierarchical food taxonomy using Sentence-Transformers.
 - **Image Intelligence**: A CPU-optimized Vision POC using CLIP to identify food concepts in images.
-- **Analytics Dashboard**: An interactive interface for real-time KPI monitoring and visualization.
+- **Analytics Dashboard**: An interactive interface for on-demand KPI monitoring and visualization.
 
 ## Architecture
 The pipeline follows a layered architecture:
@@ -16,7 +16,7 @@ The pipeline follows a layered architecture:
 2. **Intelligence Layer (`src/engine`)**: The core logic engine containing the Entity Resolution (ER) engine, Text Classifier, and Image Processor modules.
 3. **Persistence Layer (`src/database` & `src/scraper/persistence.py`)**: Handles SQLite storage for venues, menu items, matches, and classifications.
 4. **API Layer (`src/api`)**: A FastAPI-based REST API providing analytics endpoints (Match Rate, Venue Density, etc.) for the dashboard.
-5. **Presentation Layer (`src/dashboard`)**: A Vue.js powered single-page application for data visualization.
+5. **Presentation Layer (`src/api/static`)**: A Vue.js powered single-page dashboard served directly by FastAPI at the root URL.
 
 ## Prerequisites
 - **Python 3.12+**
@@ -84,14 +84,16 @@ python3 src/engine/main.py --process-images
 ```
 
 ### 4. Launching the Dashboard
-1. **Start the FastAPI Server**:
+1. **Start the FastAPI Server** (serves both the API and the dashboard):
    ```bash
    python3 src/api/main.py
    ```
-2. **View the Results**:
-   Open `src/dashboard/index.html` in your web browser.
+2. **View the Dashboard**:
+   Open [http://localhost:8000](http://localhost:8000) in your browser.
 
-The dashboard exposes the following API endpoints:
+   The dashboard is served directly by FastAPI (no separate HTTP server needed).
+
+The API exposes the following endpoints:
 - `GET /health` — Database connectivity health check
 - `GET /analytics/match-rate` — Match rate statistics (distinct venues)
 - `GET /analytics/categories` — Top 10 classified food categories
@@ -99,9 +101,11 @@ The dashboard exposes the following API endpoints:
 - `GET /analytics/classification-coverage` — Classification pipeline coverage (% of menu items classified)
 - `GET /analytics/venues` — All venue coordinates with match status (for map)
 
-> **Note on CORS**: By default the API allows origins from `http://<API_HOST>:<API_PORT>` and `http://localhost:<API_PORT>`. You can override via the `API_CORS_ORIGINS` environment variable (comma-separated).
-
-The dashboard includes an **interactive venue map** using Leaflet.js that shows matched (green) and unmatched (red) venues with popup information.
+The dashboard includes:
+- **KPI cards** — Total Just Eat venues, matched Google venues, match rate, menu items, and classification coverage.
+- **Top Food Categories chart** — Bar chart of the most classified categories.
+- **Interactive venue map** — Leaflet.js map showing matched (green) and unmatched (red) venues with popup details.
+- **System Status panel** — API connectivity, database status, and a **Refresh Data** button for manual updates (no auto-refresh).
 
 ### Git & Large Files
 The original `source/just_eat_venues.json` (186MB) exceeds GitHub's recommended size. The dataset is split into 3 parts in `source/just_eat_venues_split/`. Before pushing to GitHub:
@@ -208,7 +212,7 @@ Pipeline outputs are written to:
 - `source/just_eat_venues_split/`: Just Eat venues dataset split into 3 parts for GitHub compatibility.
 - `src/api/`: FastAPI backend and analytics endpoints.
 - `src/database/`: Database initialization and schema management (SQLAlchemy models).
-- `src/dashboard/`: Vue.js frontend (HTML/JS).
+- `src/api/static/`: Vue.js dashboard frontend (served at the API root).
 - `src/engine/`: The "intelligence" layer (ER, Classifier, Image Processor, Venue Loader).
 - `src/engine/venue_loader.py`: Unified loader for single-file or split JSON directories.
 - `src/scraper/`: Web scraping module (Playwright-based crawler).

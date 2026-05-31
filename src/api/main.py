@@ -1,6 +1,7 @@
 import logging
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import List, Optional
 from sqlalchemy.orm import Session
@@ -171,6 +172,8 @@ def get_venue_coordinates(db: Session = Depends(get_db)):
         logger.error("Error fetching venue coordinates: %s", e)
         raise HTTPException(status_code=503, detail=f"Database error: {e}")
 
+
+app.mount("/", StaticFiles(directory="src/api/static", html=True), name="dashboard")
 
 if __name__ == "__main__":
     import uvicorn
