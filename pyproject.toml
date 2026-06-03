@@ -20,10 +20,8 @@ dev = [
     "pytest",
     "pytest-asyncio",
 ]
-ml = [
-    "torch",
-    "transformers",
-    "pillow",
+ocr = [
+    "easyocr>=1.7.2",
 ]
 
 [build-system]

@@ -16,7 +16,7 @@ class TestClassifierReclassification(unittest.TestCase):
         self.cursor.execute(
             "CREATE TABLE food_taxonomy (category_uidentifier VARCHAR, name VARCHAR, parent VARCHAR, family VARCHAR)")
         self.cursor.execute(
-            "CREATE TABLE menu_items (id INTEGER PRIMARY KEY AUTOINCREMENT, je_venue_id VARCHAR, name VARCHAR, description TEXT, price FLOAT)")
+            "CREATE TABLE menu_items (id INTEGER PRIMARY KEY AUTOINCREMENT, je_venue_id VARCHAR, name VARCHAR, description TEXT, price FLOAT, section VARCHAR)")
         self.cursor.execute(
             "CREATE TABLE classifications (id INTEGER PRIMARY KEY AUTOINCREMENT, menu_item_id INTEGER, taxonomy_id VARCHAR, confidence FLOAT)")
 

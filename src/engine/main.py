@@ -85,7 +85,9 @@ def main():
         return
 
     if args.process_images:
+        from src.database.init_db import init_db
         from src.engine.image_processor import ImageProcessor
+        init_db(db_path=args.db_path)
         logger.info("--- Starting Image Processing Pipeline ---")
         try:
             processor = ImageProcessor(db_path=args.db_path, image_root=args.image_root)

@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func, text
 
 from src.config import Config
-from src.database.init_db import get_session, VenueJE, MenuItem, Match, FoodTaxonomy, Classification, ImageDetection
+from src.database.init_db import get_session, VenueJE, MenuItem, Match, FoodTaxonomy, Classification, ImageDetection, MenuDiff, MenuImageExtraction
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +102,33 @@ class VenueImageInfo(BaseModel):
     google_cid: str
     images: List[str]
     has_detections: bool = False
+
+
+class MenuDiffItem(BaseModel):
+    diff_type: str
+    extracted_name: Optional[str] = None
+    db_name: Optional[str] = None
+    extracted_price: Optional[float] = None
+    db_price: Optional[float] = None
+    extracted_description: Optional[str] = None
+    db_description: Optional[str] = None
+    menu_item_id: Optional[int] = None
+    match_score: Optional[float] = None
+    section: Optional[str] = "general"
+
+
+class VenueMenuDetail(BaseModel):
+    je_venue_id: Optional[str] = None
+    je_venue_name: Optional[str] = None
+    google_cid: str
+    images: List[str] = []
+    total_db_items: int
+    total_extracted: int
+    matches: int
+    new_items: int
+    removed_items: int
+    price_changes: int
+    diffs: List[MenuDiffItem]
 
 
 def _count_je_venues(db: Session) -> int:
@@ -247,6 +274,137 @@ def get_venue_images(db: Session = Depends(get_db)):
         return result
     except Exception as e:
         logger.error("Error fetching venue images: %s", e)
+        raise HTTPException(status_code=503, detail=f"Database error: {e}")
+
+
+@app.get("/analytics/menu-extractions", response_model=List[VenueMenuDetail])
+def list_menu_extractions(db: Session = Depends(get_db)):
+    try:
+        matches = db.query(Match.je_venue_id, Match.google_venue_id).all()
+        je_names = {v.id: v.name for v in db.query(VenueJE.id, VenueJE.name).all()}
+        images_dir = str(Config.GOOGLE_IMAGES_DIR)
+
+        diff_cid_map = {}
+        for (cid,) in db.query(MenuDiff.google_cid).distinct().all():
+            rows = db.query(MenuDiff).filter(MenuDiff.google_cid == cid).all()
+            if rows:
+                diff_cid_map[cid] = rows
+
+        seen_cids = set()
+        result = []
+        for match in matches:
+            google_cid = PLACE_ID_TO_CID.get(match.google_venue_id)
+            if not google_cid or google_cid in seen_cids:
+                continue
+            venue_dir = os.path.join(images_dir, google_cid)
+            if not os.path.isdir(venue_dir):
+                continue
+            image_list = sorted([
+                f for f in os.listdir(venue_dir)
+                if f.lower().endswith(('.jpg', '.jpeg', '.png'))
+            ])
+            if not image_list:
+                continue
+            seen_cids.add(google_cid)
+
+            total_db = db.query(func.count(MenuItem.id)).filter(
+                MenuItem.je_venue_id == match.je_venue_id
+            ).scalar() or 0
+
+            diffs = diff_cid_map.get(google_cid, [])
+            items = [
+                MenuDiffItem(
+                    diff_type=d.diff_type,
+                    extracted_name=d.extracted_name,
+                    db_name=d.db_name,
+                    extracted_price=d.extracted_price,
+                    db_price=d.db_price,
+                    extracted_description=d.extracted_description,
+                    db_description=d.db_description,
+                    menu_item_id=d.menu_item_id,
+                    match_score=d.match_score,
+                    section=d.section or "general",
+                )
+                for d in diffs
+            ]
+            dt = [d.diff_type for d in diffs]
+            result.append(VenueMenuDetail(
+                je_venue_id=match.je_venue_id,
+                je_venue_name=je_names.get(match.je_venue_id, "Unknown"),
+                google_cid=google_cid,
+                images=image_list,
+                total_db_items=total_db,
+                total_extracted=sum(1 for t in dt if t in ("match", "new", "price_changed", "desc_changed")),
+                matches=dt.count("match"),
+                new_items=dt.count("new"),
+                removed_items=dt.count("removed"),
+                price_changes=dt.count("price_changed") + dt.count("desc_changed"),
+                diffs=items,
+            ))
+        return result
+    except Exception as e:
+        logger.error("Error fetching menu extractions: %s", e)
+        raise HTTPException(status_code=503, detail=f"Database error: {e}")
+
+
+@app.get("/analytics/menu-extractions/{google_cid}", response_model=VenueMenuDetail)
+def get_venue_menu_detail(google_cid: str, db: Session = Depends(get_db)):
+    try:
+        diffs = (
+            db.query(MenuDiff)
+            .filter(MenuDiff.google_cid == google_cid)
+            .all()
+        )
+        if not diffs:
+            raise HTTPException(status_code=404, detail=f"No extractions found for CID {google_cid}")
+
+        je_venue_id = diffs[0].je_venue_id
+        total_db = db.query(func.count(MenuItem.id)).filter(
+            MenuItem.je_venue_id == je_venue_id
+        ).scalar() or 0
+
+        je_names = {v.id: v.name for v in db.query(VenueJE.id, VenueJE.name).all()}
+
+        items = [
+            MenuDiffItem(
+                diff_type=d.diff_type,
+                extracted_name=d.extracted_name,
+                db_name=d.db_name,
+                extracted_price=d.extracted_price,
+                db_price=d.db_price,
+                extracted_description=d.extracted_description,
+                db_description=d.db_description,
+                menu_item_id=d.menu_item_id,
+                match_score=d.match_score,
+                section=d.section or "general",
+            )
+            for d in diffs
+        ]
+        images_dir = str(Config.GOOGLE_IMAGES_DIR)
+        venue_dir = os.path.join(images_dir, google_cid)
+        image_list = sorted([
+            f for f in os.listdir(venue_dir)
+            if f.lower().endswith(('.jpg', '.jpeg', '.png'))
+        ]) if os.path.isdir(venue_dir) else []
+
+        dt = [d.diff_type for d in diffs]
+        return VenueMenuDetail(
+            je_venue_id=je_venue_id,
+            je_venue_name=je_names.get(je_venue_id, "Unknown"),
+            google_cid=google_cid,
+            images=image_list,
+            total_db_items=total_db,
+            total_extracted=sum(1 for t in dt if t in ("match", "new", "price_changed", "desc_changed")),
+            matches=dt.count("match"),
+            new_items=dt.count("new"),
+            removed_items=dt.count("removed"),
+            price_changes=dt.count("price_changed") + dt.count("desc_changed"),
+            diffs=items,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Error fetching venue menu detail: %s", e)
         raise HTTPException(status_code=503, detail=f"Database error: {e}")
 
 

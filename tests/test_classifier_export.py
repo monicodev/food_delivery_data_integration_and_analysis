@@ -21,7 +21,8 @@ class TestClassifierExport(unittest.TestCase):
         self.cursor.execute("""
             CREATE TABLE menu_items (
                 id INTEGER PRIMARY KEY,
-                je_venue_id TEXT, name TEXT, description TEXT, price REAL
+                je_venue_id TEXT, name TEXT, description TEXT, price REAL,
+                section VARCHAR
             )
         """)
         self.cursor.execute("""

@@ -1,5 +1,5 @@
 import os
-from sqlalchemy import create_engine, Column, String, Float, Integer, ForeignKey, Text, func
+from sqlalchemy import create_engine, Column, String, Float, Integer, ForeignKey, Text, func, text
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 
@@ -55,6 +55,7 @@ class MenuItem(Base):
     name = Column(String, nullable=False)
     description = Column(Text)
     price = Column(Float)
+    section = Column(String, nullable=True)
     venue = relationship("VenueJE", back_populates="menu_items")
 
 
@@ -72,6 +73,36 @@ class ImageDetection(Base):
     google_cid = Column(String, nullable=False)
     concept = Column(String, nullable=False)
     confidence = Column(Float)
+    created_at = Column(String, server_default=func.current_timestamp())
+
+
+class MenuImageExtraction(Base):
+    __tablename__ = 'menu_image_extractions'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    google_cid = Column(String, nullable=False)
+    image_file = Column(String, nullable=False)
+    item_name = Column(String, nullable=False)
+    item_price = Column(Float, nullable=True)
+    item_description = Column(Text, nullable=True)
+    confidence = Column(Float, nullable=True)
+    created_at = Column(String, server_default=func.current_timestamp())
+
+
+class MenuDiff(Base):
+    __tablename__ = 'menu_diffs'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    google_cid = Column(String, nullable=False)
+    je_venue_id = Column(String, nullable=True)
+    diff_type = Column(String, nullable=False)
+    extracted_name = Column(String, nullable=True)
+    db_name = Column(String, nullable=True)
+    extracted_price = Column(Float, nullable=True)
+    db_price = Column(Float, nullable=True)
+    extracted_description = Column(Text, nullable=True)
+    db_description = Column(Text, nullable=True)
+    menu_item_id = Column(Integer, nullable=True)
+    match_score = Column(Float, nullable=True)
+    section = Column(String, nullable=True)
     created_at = Column(String, server_default=func.current_timestamp())
 
 
@@ -95,6 +126,11 @@ def init_db(db_path: str = None):
         os.makedirs(os.path.dirname(target), exist_ok=True)
     engine = _get_engine(db_path)
     Base.metadata.create_all(bind=engine)
+    with engine.connect() as conn:
+        cols = [row[1] for row in conn.execute(text("PRAGMA table_info(menu_items)")).fetchall()]
+        if "section" not in cols:
+            conn.execute(text("ALTER TABLE menu_items ADD COLUMN section VARCHAR"))
+            conn.commit()
 
 
 def get_session(db_path: str = None):

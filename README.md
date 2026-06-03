@@ -7,13 +7,13 @@ This project automates the integration of disparate food delivery datasets using
 - **Web Scraping**: Automated extraction of Just Eat venue and menu data via Playwright.
 - **Entity Resolution**: A hybrid algorithm matching Just Eat venues to Google Maps via name similarity (RapidFuzz with token-level comparison), geospatial proximity (Haversine + geo-grid pre-filtering), and address-based score boosting.
 - **Text Classification**: Keyword-based mapping of menu items to a hierarchical food taxonomy with fuzzy matching, accent normalization, and Spanish alias support.
-- **Image Intelligence**: A CPU-optimized Vision POC using CLIP to identify food concepts in images.
+- **Image Intelligence**: Optical Character Recognition (OCR) via EasyOCR to extract menu text from venue images, parse dish names/prices/descriptions, and detect diffs against the Just Eat database (new items, removed items, price changes).
 - **Analytics Dashboard**: An interactive interface for on-demand KPI monitoring and visualization.
 
 ## Architecture
 The pipeline follows a layered architecture:
 1. **Ingestion Layer (`src/scraper`)**: Crawls Just Eat URLs and processes raw JSON data into a structured format.
-2. **Intelligence Layer (`src/engine`)**: The core logic engine containing the Entity Resolution (ER) engine, Text Classifier, and Image Processor modules.
+2. **Intelligence Layer (`src/engine`)**: The core logic engine containing the Entity Resolution (ER) engine, Text Classifier, and Menu Extractor modules.
 3. **Persistence Layer (`src/database` & `src/scraper/persistence.py`)**: Handles SQLite storage for venues, menu items, matches, and classifications.
 4. **API Layer (`src/api`)**: A FastAPI-based REST API providing analytics endpoints (Match Rate, Venue Density, etc.) for the dashboard.
 5. **Presentation Layer (`src/api/static`)**: A Vue.js powered single-page dashboard served directly by FastAPI at the root URL.
@@ -29,13 +29,13 @@ The pipeline follows a layered architecture:
 Navigate to the project root and install the required dependencies:
 ```bash
 # Install core dependencies (enough for entity resolution + keyword classification)
-python3 -m pip install fastapi uvicorn sqlalchemy pandas openpyxl rapidfuzz python-dotenv
+python3 -m pip install fastapi uvicorn sqlalchemy pandas rapidfuzz python-dotenv
 
-# Install ML dependencies only if running image processing
-# python3 -m pip install opencv-python pillow torch
+# Install OCR dependencies for image-based menu extraction
+python3 -m pip install easyocr
 
 # Install Playwright browsers for scraping (only if running the scraper)
-# python3 -m playwright install chromium
+python3 -m playwright install chromium
 ```
 
 **Note**: You can customize the pipeline behavior (e.g., database path, scraper mode) by copying `.env.example` to `.env` and adjusting values.
@@ -76,9 +76,10 @@ python3 -m src.engine.main --classify
 ```
 No ML dependencies required. Runs entirely on CPU with RapidFuzz. Spanish/common aliases (e.g., "pollo" → chicken, "patatas" → fries, "queso" → cheese) are built-in. Force re-classification with `--force`.
 
-#### **Step C: Image Processing (POC)**
-Process images in `source/google_images/` to identify food concepts:
+#### **Step C: Image Processing (OCR Menu Extraction)**
+Extract menu text from venue images via EasyOCR, parse dish names/prices/descriptions, and compute diffs against the database:
 ```bash
+# Requires EasyOCR (pip install easyocr). First run downloads ~1-2GB model files.
 python3 -m src.engine.main --process-images
 ```
 
@@ -100,11 +101,14 @@ The API exposes the following endpoints:
 - `GET /analytics/classification-coverage` — Classification pipeline coverage (% of menu items classified)
 - `GET /analytics/venues` — All venue coordinates with match status (for map)
 - `GET /analytics/venue-images` — Matched JE venues with Google image folders and photo counts
+- `GET /analytics/menu-extractions` — Venues with images, menu diffs (OCR-extracted vs. database items)
+- `GET /analytics/menu-extractions/{cid}` — Detailed view per venue with diffs by section
 
 The dashboard includes:
 - **KPI cards** — Total Just Eat venues, matched Google venues, match rate, menu items, and classification coverage.
 - **Top Food Categories chart** — Bar chart of the most classified categories.
 - **Interactive venue map** — Leaflet.js map showing matched (green) and unmatched (red) venues with popup details.
+- **Venue images & menu diffs** — Image gallery per venue with color-coded diff table (green=new, red=removed, yellow=price changed), comparing OCR-extracted items against database records.
 - **System Status panel** — API connectivity, database status, and a **Refresh Data** button for manual updates (no auto-refresh).
 
 ### Git & Large Files
@@ -138,20 +142,6 @@ Import the food taxonomy Excel file separately:
 ```bash
 python3 -m src.engine.main --import-taxonomy
 ```
-
-#### Image Evaluation Metrics
-The `ImageProcessor` includes an evaluation mode that computes:
-- **Top-1 / Top-3 Accuracy** when ground truth labels are provided
-- **Mean confidence** across all predictions
-- **Inference latency** (mean and P95 in milliseconds)
-
-```python
-from src.engine.image_processor import ImageProcessor
-processor = ImageProcessor()
-metrics = processor.evaluate(ground_truth={"<cid>": "pizza"})
-```
-
-A standalone latency benchmark runs when no ground truth is provided.
 
 #### Image Download from Google Places
 ```python
@@ -211,7 +201,7 @@ Pipeline outputs are written to:
 - **Entity resolution matches**: `source/output/matches.json`
 - **Unmatched venue report**: `source/output/unmatched_venues.json`
 - **Classifications**: `source/output/classifications.json` (includes Name, Parent, Family)
-- **Image detections**: `source/output/images/{cid}/{cid}_results.json` and `source/output/images/{cid}/{cid}_results.csv`
+- **OCR extractions**: `source/output/images/{cid}/{cid}_results.json` and `source/output/images/{cid}/{cid}_results.csv` (extracted items, prices, diffs)
 
 ## Project Structure
 - `source/`: Source data files (`google_venues.json`, `just_eat_venues_split/`) and processed output.
@@ -232,9 +222,9 @@ Pipeline outputs are written to:
 - **CSS selectors are fragile**: The primary extraction path uses JSON-LD structured data. CSS selectors are a fallback and may break on site redesigns.
 - **Single-threaded scraping**: Venues are processed sequentially with rate limiting (~5-10s per venue). No parallel or distributed scraping.
 - **City detection uses a known list**: The matcher identifies cities by word-boundary matching against `Config.KNOWN_CITIES` (31 European cities). Extend this list for venues outside those cities.
-- **torch + transformers are heavy (~1.5GB)**: Listed as optional dependencies (`pip install .[ml]`) only for image processing. Classification is keyword-only and requires zero ML dependencies.
+- **EasyOCR requires PyTorch (~2GB)**: First `--process-images` run downloads detection + recognition models. Runs on CPU.
 - **Dashboard requires internet**: Vue 3, Chart.js, Tailwind, and Leaflet are loaded from CDN. No offline fallback.
-- **No ground truth for image evaluation**: The image processor produces predictions and latency benchmarks, but accuracy metrics require manually-provided labels.
+- **OCR accuracy depends on image quality**: Menu text extraction quality varies with photo resolution, lighting, and font styles.
 - **Only the best match is persisted**: Entity resolution computes top candidates internally, but only the single best match per venue is stored (no audit trail for manual threshold tuning).
 - **SQLite, not PostgreSQL**: Suitable for single-user POC use. Concurrent access would require PostgreSQL.
 - **No authentication on the API**: CORS is open. Production deployment should add API key or JWT auth.

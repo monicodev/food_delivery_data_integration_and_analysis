@@ -9,10 +9,8 @@ playwright==1.60.0
 pandas==3.0.3
 numpy==2.4.6
 requests==2.34.2
-# Heavy ML deps (install separately if needed)
-# torch==2.12.0
-# pillow==12.2.0
-# transformers==4.52.0
+# EasyOCR for image-based menu text extraction
+easyocr>=1.7.2
 
 # Dev
 pytest==9.0.3

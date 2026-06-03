@@ -83,8 +83,11 @@ def import_venues_to_db(db_path: str, primary_path: str, split_dir: str) -> int:
             )
             session.merge(je_venue)
 
+            session.query(MenuItem).filter(MenuItem.je_venue_id == venue_id).delete()
+
             for menu_group in (venue.get("menus") or {}).values():
                 for section in menu_group.get("sections") or []:
+                    section_name = section.get("name", "general")
                     for item in section.get("items") or []:
                         item_name = item.get("name")
                         if not item_name:
@@ -94,6 +97,7 @@ def import_venues_to_db(db_path: str, primary_path: str, split_dir: str) -> int:
                             name=item_name,
                             description=item.get("description", ""),
                             price=item.get("price"),
+                            section=section_name,
                         )
                         session.add(menu_item)
                         total_items += 1
