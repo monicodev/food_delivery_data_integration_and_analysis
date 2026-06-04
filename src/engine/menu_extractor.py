@@ -8,6 +8,7 @@ import os
 import re
 import json
 import logging
+import unicodedata
 from typing import Optional, Dict, Any, List, Tuple
 from src.config import Config
 
@@ -15,6 +16,7 @@ from src.config import Config
 import cv2
 import numpy as np
 from PIL import Image, ImageOps
+from rapidfuzz import fuzz
 
 logger = logging.getLogger(__name__)
 
@@ -82,11 +84,9 @@ def _get_reader():
 
 def _rotate_image_if_needed(image_path: str) -> np.ndarray:
     """
-    Safely detects the optimal image orientation.
-    Only applies rotations if the current readability is poor and 
-    another orientation drastically improves text detection.
+    Detects the true optimal image orientation by thoroughly testing all 4 angles.
+    Does not early-exit on low thresholds, ensuring horizontal menus are rotated correctly.
     """
-    # 1. Attempt to correct using EXIF camera metadata
     try:
         img_pil = Image.open(image_path)
         img_pil = ImageOps.exif_transpose(img_pil)
@@ -101,75 +101,53 @@ def _rotate_image_if_needed(image_path: str) -> np.ndarray:
     if not reader:
         return img
 
-    # 2. Sample the center of the image to evaluate readability quickly
-    h, w = img.shape[:2]
-    crop_y1, crop_y2 = int(h * 0.25), int(h * 0.75)
-    crop_x1, crop_x2 = int(w * 0.25), int(w * 0.75)
-    
     def _get_orientation_score(image_array: np.ndarray) -> int:
+        cur_h, cur_w = image_array.shape[:2]
+        crop_y1, crop_y2 = int(cur_h * 0.15), int(cur_h * 0.85)
+        crop_x1, crop_x2 = int(cur_w * 0.15), int(cur_w * 0.85)
         sample = image_array[crop_y1:crop_y2, crop_x1:crop_x2]
+        
         detected_texts = reader.readtext(sample, detail=0)
-        # Count words that look like real menu text (alphanumeric > 2 chars)
-        return sum(1 for text in detected_texts if len(text) >= 3 and not re.match(r'^[^a-zA-Z0-9]+$', text))
+        
+        score = 0
+        for text in detected_texts:
+            text_clean = text.lower().strip()
+            if len(text_clean) >= 3 and not re.match(r'^[^a-zA-Z0-9]+$', text_clean):
+                score += 1
+                # Weight heavier for common menu linguistics/keywords found in this text
+                if any(k in text_clean for k in ["pizz", "burg", "preu", "salsa", "amb", "formatge", "de"]):
+                    score += 2
+        return score
 
-    score_original = _get_orientation_score(img)
-    logger.info(f"Original readability score for {os.path.basename(image_path)}: {score_original}")
-
-    # Avoid false positives: if current orientation is good enough, do not rotate
-    if score_original >= 8:
-        logger.info("Original image is readable. Keeping current orientation.")
-        return img
-
-    # 3. Evaluate alternative rotations
+    # Generate all baseline rotation configurations
     img_90 = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
-    img_270 = cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE)
     img_180 = cv2.rotate(img, cv2.ROTATE_180)
-
-    # Re-calculate dimensions for rotated samples
-    h_rot, w_rot = img_90.shape[:2]
-    r_crop_y1, r_crop_y2 = int(h_rot * 0.25), int(h_rot * 0.75)
-    r_crop_x1, r_crop_x2 = int(w_rot * 0.25), int(w_rot * 0.75)
-
-    def _get_rot_orientation_score(image_array: np.ndarray) -> int:
-        sample = image_array[r_crop_y1:r_crop_y2, r_crop_x1:r_crop_x2]
-        detected_texts = reader.readtext(sample, detail=0)
-        return sum(1 for text in detected_texts if len(text) >= 3 and not re.match(r'^[^a-zA-Z0-9]+$', text))
-
-    score_90 = _get_rot_orientation_score(img_90)
-    score_270 = _get_rot_orientation_score(img_270)
-    score_180 = _get_orientation_score(img_180) 
+    img_270 = cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
     scores = {
-        "original": score_original,
-        "90": score_90,
-        "270": score_270,
-        "180": score_180
+        "original": _get_orientation_score(img),
+        "90": _get_orientation_score(img_90),
+        "180": _get_orientation_score(img_180),
+        "270": _get_orientation_score(img_270)
     }
     
     best_orientation = max(scores, key=scores.get)
-    
-    # 4. Apply rotation only if it improves readability by a significant margin
-    if best_orientation == "original" or scores[best_orientation] <= score_original + 3:
-        logger.info("No rotation significantly improves text readability. Keeping original.")
-        return img
-    
-    if best_orientation == "90":
-        logger.info(f"Rotating 90° (CW). Score: {score_90} vs Original: {score_original}")
-        return img_90
-    elif best_orientation == "270":
-        logger.info(f"Rotating 270° (CCW). Score: {score_270} vs Original: {score_original}")
-        return img_270
-    elif best_orientation == "180":
-        logger.info(f"Rotating 180° (Upside down). Score: {score_180} vs Original: {score_original}")
-        return img_180
+    logger.info(f"Orientation analysis for {os.path.basename(image_path)}: {scores}. Selected: {best_orientation}")
 
+    if best_orientation == "90":
+        return img_90
+    elif best_orientation == "180":
+        return img_180
+    elif best_orientation == "270":
+        return img_270
+        
     return img
 
 
-# ── OCR ──────────────────────────────────────────────────────────────────────
+# ── OCR (Column-Aware Processing) ───────────────────────────────────────────
 
 def ocr_image(image_path: str) -> Optional[str]:
-    """Extract raw text from an image via EasyOCR with prior orientation correction."""
+    """Extract raw text from an image keeping lines sorted vertically per column sequence."""
     if not _HAS_EASYOCR:
         logger.warning("EasyOCR not installed. Run: pip install easyocr")
         return None
@@ -179,22 +157,37 @@ def ocr_image(image_path: str) -> Optional[str]:
     try:
         corrected_img = _rotate_image_if_needed(image_path)
         
-        # EasyOCR can process OpenCV arrays (numpy ndarray) directly
-        results = reader.readtext(corrected_img, paragraph=False)
+        # Pull bounding box information (detail=1) to prevent mixed-column text stitching
+        results = reader.readtext(corrected_img, detail=1, paragraph=False)
         if not results:
             return None
-        lines = []
-        for entry in results:
-            if len(entry) == 3:
-                _, text, conf = entry
+        
+        w = corrected_img.shape[1]
+        col_width = w / 2  # Assuming layout splits structurally down 2 primary vertical zones
+        
+        left_column = []
+        right_column = []
+        
+        for bbox, text, conf in results:
+            if conf < 0.35 or not text.strip():
+                continue
+            
+            # Extract center X and Y coordinate points from polygon boundary
+            center_x = sum(pt[0] for pt in bbox) / 4.0
+            center_y = sum(pt[1] for pt in bbox) / 4.0
+            
+            if center_x < col_width:
+                left_column.append((center_y, text))
             else:
-                text, conf = entry
-            if isinstance(text, list):
-                text = " ".join(text)
-            text = text.strip()
-            if text and conf >= 0.3:
-                lines.append(text)
-        return "\n".join(lines) if lines else None
+                right_column.append((center_y, text))
+                
+        # Sequence layout elements linearly down each column lane independently
+        left_column.sort(key=lambda x: x[0])
+        right_column.sort(key=lambda x: x[0])
+        
+        combined_lines = [item[1] for item in left_column] + [item[1] for item in right_column]
+        return "\n".join(combined_lines) if combined_lines else None
+
     except Exception as e:
         logger.error("EasyOCR failed for %s: %s", image_path, e)
         return None
@@ -203,13 +196,89 @@ def ocr_image(image_path: str) -> Optional[str]:
 # ── Parsing ──────────────────────────────────────────────────────────────────
 
 _PRICE_RE = re.compile(
-    r"(?P<price>\d{1,3}[.,]\d{2})\s*(?:€|EUR|euro|lata)?|(?:€|EUR|euro)\s*(?P<price2>\d{1,3}[.,]\d{2})",
+    r"(?P<price>\d{1,2}[.,]\d{1,2})\s*(?:€|EUR|euro)?|(?:€|EUR|euro)\s*(?P<price2>\d{1,2}[.,]\d{1,2})",
     re.IGNORECASE,
 )
 
 _ITEM_NUMBER_RE = re.compile(r"^\d+[\s.-]+")
+
+# ── Garbage detection ─────────────────────────────────────────────────────────
+
+_MENU_FOOTER_RE = re.compile(
+    r"pedido\s*m[níi]*nimo|horario|tel[eé]fono|abierto|"
+    r"domingo|s[bá]bado|viernes|lunes|martes|mi[eé]rcoles|"
+    r"reparto|recoger|€\s*\d+[,.]\d{2}\s*(iva|tva|vat)",
+    re.IGNORECASE,
+)
+
+def _is_garbage(text: str) -> bool:
+    if not text or len(text) < 3:
+        return True
+
+    total = len(text)
+    digits = sum(1 for c in text if c.isdigit())
+    letters = sum(1 for c in text if c.isalpha())
+    alphanum = digits + letters
+    symbols = total - alphanum
+
+    if digits / total > 0.60:
+        return True
+
+    if symbols / total > 0.40:
+        return True
+
+    if letters > 0 and letters / total < 0.20:
+        return True
+
+    stripped = text.replace(" ", "").replace(".", "").replace(",", "")
+    if stripped and not any(c.isalpha() for c in stripped):
+        return True
+
+    if re.search(r"www\.|\.com|\.es\b", text, re.IGNORECASE):
+        return True
+
+    if _MENU_FOOTER_RE.search(text):
+        return True
+
+    words = text.split()
+    if any(len(set(w)) == 1 and len(w) > 2 for w in words):
+        return True
+
+    unique = set(text.replace(" ", "").lower())
+    if len(unique) <= 3 and total > 6 and letters / total < 0.5:
+        return True
+
+    if 3 < len(text) < 6 and digits > 0 and letters > 0 and not any(c.isspace() for c in text):
+        return True
+
+    if "€" in text and digits / total > 0.3 and letters < 3:
+        return True
+
+    if len(words) >= 2 and len(set(words)) == 1:
+        return True
+
+    if len(words) >= 3 and any(words.count(w) > 1 for w in set(words)):
+        return True
+
+    price_match = re.search(r"\d+\s*€", text)
+    if price_match:
+        rest = text[price_match.end():].strip()
+        if rest and len(rest) < 12 and letters / total < 0.65:
+            return True
+
+    mangled_price = re.match(r"\d+[,.]\d*[a-zA-Z]", text)
+    if mangled_price:
+        return True
+
+    consonant_run = re.findall(r"[bcdfghjklmnpqrstvwxyzBCDFGHJKLMNPQRSTVWXYZ]{4,}", text)
+    if consonant_run:
+        return True
+
+    return False
+
+
 _SECTION_HEADER_RE = re.compile(
-    r"^(ENSALADAS|POSTRES|PIZZAS|COMPLEMENTOS|BEBIDAS|ENTRANTS|ENTRANTES|SEGONS|SEGUNDOS|PLATES|COMBINADOS|ESPECIALITAT|POSTRES|DRINKS|CURRIES|PIZZES)$",
+    r"^(PIZZES|PIZZAS|BURGERS|ENTREPANS|AMANIDES|PASTES|DOLÇOS|SALSES|TOPPINGS|LES CASSOLETES|COSETES BONES|POSTRES|BEBIDAS|ENTRANTS|ENTRANTES|SEGONS|SEGUNDOS|PLATES|COMBINADOS|ESPECIALITAT|DRINKS|CURRIES)$",
     re.IGNORECASE
 )
 
@@ -286,30 +355,41 @@ def parse_menu_text(raw: str) -> List[Dict[str, Any]]:
 
     valid_candidates = []
     for c in candidates:
-        if len(c["name"]) >= 3 and not c["name"].isdigit():
+        name = c["name"]
+        if len(name) >= 3 and not name.isdigit() and not _is_garbage(name):
             valid_candidates.append(c)
-            
+
     return valid_candidates
 
 
 # ── Matching ──────────────────────────────────────────────────────────────────
 
-from rapidfuzz import fuzz
+def _normalize_match(text: str) -> str:
+    text = text.lower()
+    text = unicodedata.normalize("NFKD", text)
+    text = text.encode("ascii", "ignore").decode("ascii")
+    text = re.sub(r"^\d+[\s.\-)]*", "", text)
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
 
 def _match_name(
     extracted_name: str, db_names: List[Tuple[int, str]]
 ) -> Optional[Tuple[int, str, float]]:
     if not extracted_name or not db_names:
         return None
+    norm_extracted = _normalize_match(extracted_name)
     best: Optional[Tuple[int, str, float]] = None
     best_score = 0.0
     for item_id, db_name in db_names:
-        score = fuzz.token_set_ratio(extracted_name.lower(), db_name.lower()) / 100.0
+        norm_db = _normalize_match(db_name)
+        score = fuzz.token_set_ratio(norm_extracted, norm_db) / 100.0
         if score > best_score:
             best_score = score
             best = (item_id, db_name, score)
             
-    if best and best_score >= 0.60:
+    if best and best_score >= 0.55:
         return best
     return None
 
@@ -329,7 +409,7 @@ def compute_diffs(
     for cand in candidates:
         db_names = [(it["id"], it["name"]) for it in db_items]
         match = _match_name(cand["name"], db_names)
-        
+
         if match:
             item_id, db_name, score = match
             db_item = db_by_id[item_id]
@@ -349,7 +429,7 @@ def compute_diffs(
             if (
                 cand_desc
                 and db_desc
-                and fuzz.token_set_ratio(cand_desc.lower(), db_desc.lower()) < 60
+                and fuzz.token_set_ratio(_normalize_match(cand_desc), _normalize_match(db_desc)) < 60
             ):
                 diff_type = diff_type if diff_type != "match" else "desc_changed"
 
@@ -377,21 +457,6 @@ def compute_diffs(
                 "menu_item_id": None,
                 "match_score": None,
                 "section": cand.get("section", "general"),
-            })
-
-    for it in db_items:
-        if it["id"] not in matched_ids:
-            diffs.append({
-                "diff_type": "removed",
-                "extracted_name": None,
-                "db_name": it["name"],
-                "extracted_price": None,
-                "db_price": it.get("price"),
-                "extracted_description": None,
-                "db_description": it.get("description"),
-                "menu_item_id": it["id"],
-                "match_score": None,
-                "section": it.get("section", "general"),
             })
 
     return diffs
